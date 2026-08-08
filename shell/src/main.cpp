@@ -1,23 +1,52 @@
 // OpenClaw launcher shell — saucer feasibility spike.
 //
-// Cut back to the smallest thing that is known to work, to isolate why the
-// window was created but never became visible. Additions go back one at a
-// time from here.
+// The launcher is a large, almost entirely transparent window with a small
+// interactive bar near the bottom. Clicks outside the bar must reach whatever
+// is underneath; clicks on the bar must not.
+//
+// Electron does this with setIgnoreMouseEvents(ignore, {forward: true}): the
+// renderer keeps receiving mousemove even while the window is click-through,
+// so it can hit-test its own DOM and decide when to become interactive again.
+//
+// saucer has only window::set_click_through(bool), with no forwarding. Once
+// it is on, the page receives nothing and can never ask for input back —
+// measured: 68 pointer events with it off, zero after enabling it, including
+// on the sweep back onto the bar.
+//
+// The way out is to stop asking the page. GetCursorPos reports the pointer
+// regardless of any window's input state, so the hit-test moves into C++: the
+// page publishes the rectangles it wants to be interactive, and a poller
+// compares the cursor against them and toggles click-through. The page never
+// needs to see the pointer at all.
 
+#include <atomic>
 #include <cstdio>
+#include <mutex>
 #include <string>
+#include <thread>
+#include <vector>
 #include <filesystem>
 
 #include <saucer/smartview.hpp>
 
 #ifdef _WIN32
 #include <windows.h>
+// stable_natives<window> is only forward-declared by the core headers; the
+// backend header is what defines it (and its HWND member).
+#include <saucer/modules/stable/webview2.hpp>
 #endif
 
 namespace fs = std::filesystem;
 
 namespace
 {
+    constexpr auto kTransparent = saucer::color{.r = 0, .g = 0, .b = 0, .a = 0};
+
+    // Matches the Electron launcher's geometry.
+    constexpr int kWinWidth     = 1040;
+    constexpr int kWinHeight    = 720;
+    constexpr int kBottomMargin = 24;
+
     fs::path exe_dir()
     {
 #ifdef _WIN32
@@ -38,47 +67,59 @@ namespace
             std::fclose(f);
         }
     }
+
+    /// Interactive regions, in CSS pixels relative to the window's client area.
+    struct hit_regions
+    {
+        std::mutex mutex;
+        std::vector<saucer::bounds> rects;
+    };
 } // namespace
 
 coco::stray start(saucer::application *app)
 {
-    static constexpr auto transparent = saucer::color{.r = 0, .g = 0, .b = 0, .a = 0};
+    auto window = saucer::window::create(app).value();
+    auto view   = saucer::smartview::create({.window = window});
 
-    auto window  = saucer::window::create(app).value();
-    auto webview = saucer::smartview::create({.window = window});
-
-    if (!webview.has_value())
+    if (!view.has_value())
     {
-        co_return trace(std::string{"smartview::create failed: "} + webview.error().message());
+        co_return trace(std::string{"smartview::create failed: "} + view.error().message());
     }
 
-    // The decisive test. Electron's setIgnoreMouseEvents(ignore, {forward:true})
-    // keeps delivering mousemove while the window is click-through, which is
-    // what lets the page decide when to become interactive again. saucer has
-    // only the boolean. If the page stops receiving pointer events once this
-    // is enabled, it can never ask for them back and the launcher is inert.
-    webview->expose("set_click_through",
-                    [window](bool enabled)
-                    {
-                        window->set_click_through(enabled);
-                        trace(std::string{"set_click_through("} + (enabled ? "true" : "false") + ")");
-                    });
+    static hit_regions regions;
+    static std::atomic_bool running{true};
 
-    // Called from JS on every mousemove. Whether these keep arriving after
-    // click-through is enabled is the entire question.
-    webview->expose("pointer", [](int x, int y) {
-        trace("pointer " + std::to_string(x) + "," + std::to_string(y));
-    });
+    // The page hands us its interactive rectangles as a flat [x,y,w,h,...]
+    // list whenever its layout changes — not per mouse move, so this stays
+    // quiet once the UI has settled.
+    view->expose("set_hit_rects",
+                 [](std::vector<int> flat)
+                 {
+                     std::scoped_lock lock{regions.mutex};
+                     regions.rects.clear();
+                     for (std::size_t i = 0; i + 3 < flat.size(); i += 4)
+                     {
+                         regions.rects.push_back({flat[i], flat[i + 1], flat[i + 2], flat[i + 3]});
+                     }
+                     trace("hit rects: " + std::to_string(regions.rects.size()));
+                 });
 
-    window->set_title("saucer minimal");
-    window->set_size({.w = 480, .h = 320});
-    window->set_position({.x = 100, .y = 100});
+    window->set_title("OpenClaw (saucer spike)");
+    window->set_size({.w = kWinWidth, .h = kWinHeight});
+
+    if (const auto screens = app->screens(); !screens.empty())
+    {
+        const auto &s = screens.front();
+        window->set_position({
+            .x = s.position.x + (s.size.w - kWinWidth) / 2,
+            .y = s.position.y + s.size.h - kWinHeight - kBottomMargin,
+        });
+    }
 
     window->set_decorations(saucer::window::decoration::none);
     window->set_always_on_top(true);
-
-    window->set_background(transparent);
-    webview->set_background(transparent);
+    window->set_background(kTransparent);
+    view->set_background(kTransparent);
 
     const auto index = saucer::url::from(exe_dir() / "index.html");
     if (!index.has_value())
@@ -86,32 +127,83 @@ coco::stray start(saucer::application *app)
         co_return trace(std::string{"url::from failed: "} + index.error().message());
     }
 
-    webview->set_url(index.value());
+    view->set_url(index.value());
     window->show();
 
-    // Ask saucer what it thinks the window is, rather than inferring it from
-    // an HWND found by class name outside the process.
-    {
-        const auto sz  = window->size();
-        const auto pos = window->position();
-        trace("visible=" + std::string{window->visible() ? "true" : "false"}
-              + " size=" + std::to_string(sz.w) + "x" + std::to_string(sz.h)
-              + " pos=" + std::to_string(pos.x) + "," + std::to_string(pos.y)
-              + " topmost=" + (window->always_on_top() ? "true" : "false")
-              + " title='" + std::string{window->title()} + "'");
-    }
+#ifdef _WIN32
+    // Cursor poller. Runs off the UI thread, marshals every state change back
+    // through app->post() because window methods must touch the UI thread.
+    //
+    // Polling rather than a WH_MOUSE_LL hook on purpose: a low-level hook is
+    // global, runs in every input message's path, and is silently dropped by
+    // Windows if it ever overruns its timeout. This costs one GetCursorPos per
+    // frame and cannot affect other applications.
+    const auto hwnd = window->native().hwnd;
+    std::thread{[app, window, hwnd]
+                {
+                    bool click_through = false;
+                    bool initialised   = false;
 
+                    while (running.load(std::memory_order_relaxed))
+                    {
+                        POINT p{};
+                        RECT r{};
+                        if (GetCursorPos(&p) && GetWindowRect(hwnd, &r))
+                        {
+                            // Client-relative, and DPI-correct: derive the scale
+                            // from the window rather than assuming 96dpi.
+                            const auto dpi   = static_cast<double>(GetDpiForWindow(hwnd));
+                            const auto scale = dpi > 0 ? dpi / 96.0 : 1.0;
+                            const auto cx    = static_cast<int>((p.x - r.left) / scale);
+                            const auto cy    = static_cast<int>((p.y - r.top) / scale);
+
+                            bool over = false;
+                            {
+                                std::scoped_lock lock{regions.mutex};
+                                for (const auto &b : regions.rects)
+                                {
+                                    if (cx >= b.x && cx < b.x + b.w && cy >= b.y && cy < b.y + b.h)
+                                    {
+                                        over = true;
+                                        break;
+                                    }
+                                }
+                            }
+
+                            // Interactive over a published rect, click-through
+                            // everywhere else.
+                            if (const bool want = !over; want != click_through || !initialised)
+                            {
+                                click_through = want;
+                                initialised   = true;
+                                trace(std::string{"cursor "} + std::to_string(cx) + "," +
+                                      std::to_string(cy) + " -> click_through=" +
+                                      (want ? "true" : "false"));
+                                app->post([window, want] { window->set_click_through(want); });
+                            }
+                        }
+
+                        std::this_thread::sleep_for(std::chrono::milliseconds(16));
+                    }
+                }}
+        .detach();
+#endif
+
+    trace("shown; polling cursor for hit-testing");
     co_await app->finish();
+    running.store(false, std::memory_order_relaxed);
 }
 
 int main()
 {
     trace("--- main() entered ---");
+
     auto app = saucer::application::create({.id = "openclaw-shell"});
     if (!app.has_value())
     {
         trace(std::string{"application::create failed: "} + app.error().message());
         return 1;
     }
+
     return app->run(start);
 }

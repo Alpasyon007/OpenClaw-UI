@@ -13,7 +13,7 @@
     justify-content: flex-end; align-items: center;
     padding-bottom: 24px; box-sizing: border-box;
   }
-  .column { width: 440px; }
+  .column { width: 700px; }
   .bar {
     height: 52px; border-radius: 26px;
     display: flex; align-items: center; padding: 0 18px; gap: 12px;
@@ -29,43 +29,43 @@
     background: repeating-linear-gradient(45deg,
       rgba(255,80,80,0.85) 0 8px, rgba(80,140,255,0.85) 8px 16px);
   }
+  .bar:hover { border-color: rgba(120, 220, 180, 0.8); }
   #state { margin-left: auto; font-size: 11px; opacity: 0.75; }
 </style>
 
 <div class="column">
   <div class="probe"></div>
-  <div class="bar">
+  <div class="bar" data-interactive>
     <span class="dot"></span>
-    <span>saucer spike</span>
-    <span id="state">pointer: —</span>
+    <span>saucer spike — hover the bar, it should highlight</span>
+    <span id="state">rects: —</span>
   </div>
 </div>
 
 <script>
-  // Click-through test.
+  // Publish the interactive rectangles to C++, which does the hit-testing.
   //
-  // The bar is interactive; everything else must let clicks reach whatever is
-  // underneath. That means toggling click-through as the pointer crosses the
-  // bar's edge — which only works if mousemove keeps arriving WHILE
-  // click-through is on. Electron guarantees that with {forward: true}.
-  // saucer has no such option, so this page is really asking one question:
-  // after we turn click-through on, does anything else ever reach us?
-  const state = document.getElementById('state')
+  // The page deliberately does NOT listen for mousemove to drive click-through:
+  // that is exactly what cannot work here, because once click-through is on
+  // saucer delivers no pointer events at all. Instead C++ polls the cursor and
+  // toggles click-through against these rects, so the page only has to say
+  // where it wants to be interactive — which it knows from layout, not input.
   const call = (name, ...args) => window.saucer?.exposed?.[name]?.(...args)
 
-  let clickThrough = null
-  let moves = 0
+  function publish() {
+    const flat = []
+    for (const el of document.querySelectorAll('[data-interactive]')) {
+      const r = el.getBoundingClientRect()
+      flat.push(Math.round(r.x), Math.round(r.y), Math.round(r.width), Math.round(r.height))
+    }
+    call('set_hit_rects', flat)
+    const s = document.getElementById('state')
+    if (s) s.textContent = `rects: ${flat.length / 4}`
+  }
 
-  addEventListener('mousemove', (e) => {
-    moves++
-    call('pointer', e.clientX, e.clientY)
-
-    const onBar = !!e.target.closest('.bar')
-    state.textContent = `pointer: ${onBar ? 'ON bar' : 'off bar'} · moves ${moves}`
-
-    // Only toggle on a transition, to keep the IPC chatter down.
-    if (onBar === clickThrough) return
-    clickThrough = onBar
-    call('set_click_through', !onBar)
-  })
+  // Republish whenever layout could have moved them, and never per-frame.
+  addEventListener('load', publish)
+  addEventListener('resize', publish)
+  new ResizeObserver(publish).observe(document.querySelector('.column'))
+  publish()
 </script>

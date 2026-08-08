@@ -44,6 +44,22 @@ FetchContent_MakeAvailable(saucer)
 
 target_link_libraries(${PROJECT_NAME} PRIVATE saucer::saucer)
 
+# Reaching window->native().hwnd means including saucer's WebView2 backend
+# header, which includes WebView2.h. saucer links the SDK privately, so its
+# include directory is not propagated — pull it from the NuGet package saucer
+# downloaded during configure.
+if (WIN32)
+  file(GLOB _webview2_inc
+       "${CMAKE_BINARY_DIR}/_deps/saucer-build/nuget/packages/Microsoft.Web.WebView2.*/build/native/include")
+  if (_webview2_inc)
+    list(GET _webview2_inc 0 _webview2_inc_dir)
+    target_include_directories(${PROJECT_NAME} PRIVATE "${_webview2_inc_dir}")
+    message(STATUS "shell: WebView2 headers at ${_webview2_inc_dir}")
+  else()
+    message(FATAL_ERROR "shell: could not locate the WebView2 SDK headers")
+  endif()
+endif()
+
 add_custom_command(
   TARGET ${PROJECT_NAME} POST_BUILD
   COMMAND ${CMAKE_COMMAND} -E copy_if_different
