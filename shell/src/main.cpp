@@ -109,14 +109,31 @@ coco::stray start(saucer::application *app)
     window->set_title("OpenClaw (saucer spike)");
     window->set_size({.w = kWinWidth, .h = kWinHeight});
 
-    if (const auto screens = app->screens(); !screens.empty())
+    // Position on the PRIMARY monitor's work area.
+    //
+    // saucer's screen list is not primary-first and its screen struct has no
+    // work area at all, so it cannot place a launcher above the taskbar. Worse,
+    // win32.app.impl.cpp reads rcMonitor.top into .x and .left into .y, which
+    // is transposed and only looks right on a primary monitor where both are 0.
+    // Ask Win32 directly instead: this window was landing at x=-216, straddling
+    // two monitors.
+#ifdef _WIN32
     {
-        const auto &s = screens.front();
-        window->set_position({
-            .x = s.position.x + (s.size.w - kWinWidth) / 2,
-            .y = s.position.y + s.size.h - kWinHeight - kBottomMargin,
-        });
+        MONITORINFO mi{.cbSize = sizeof(MONITORINFO)};
+        const auto primary = MonitorFromPoint(POINT{0, 0}, MONITOR_DEFAULTTOPRIMARY);
+        if (GetMonitorInfoW(primary, &mi))
+        {
+            const auto work = mi.rcWork;
+            window->set_position({
+                .x = work.left + ((work.right - work.left) - kWinWidth) / 2,
+                .y = work.bottom - kWinHeight - kBottomMargin,
+            });
+            trace("primary work area " + std::to_string(work.left) + "," + std::to_string(work.top) +
+                  " " + std::to_string(work.right - work.left) + "x" +
+                  std::to_string(work.bottom - work.top));
+        }
     }
+#endif
 
     window->set_decorations(saucer::window::decoration::none);
     window->set_always_on_top(true);

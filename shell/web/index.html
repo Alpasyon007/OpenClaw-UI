@@ -35,6 +35,27 @@
             __beacon('load+2s; rootChildren=' + (r ? r.childElementCount : 'NO ROOT') +
                      ' clui=' + (typeof window.clui) +
                      ' exposed=' + (window.saucer && typeof window.saucer.exposed));
+            // Geometry: is the layout even inside the viewport?
+            __beacon('viewport ' + window.innerWidth + 'x' + window.innerHeight +
+                     ' dpr=' + window.devicePixelRatio +
+                     ' doc=' + document.documentElement.clientWidth + 'x' + document.documentElement.clientHeight);
+            var shell = document.querySelector('[data-clui-shell]');
+            var pill = document.querySelector('[data-tour="input"]');
+            function box(el, name) {
+              if (!el) { __beacon(name + ': MISSING'); return; }
+              var b = el.getBoundingClientRect();
+              var cs = getComputedStyle(el);
+              __beacon(name + ' rect=' + Math.round(b.x) + ',' + Math.round(b.y) + ' ' +
+                       Math.round(b.width) + 'x' + Math.round(b.height) +
+                       ' opacity=' + cs.opacity + ' display=' + cs.display +
+                       ' visibility=' + cs.visibility + ' bg=' + cs.backgroundColor);
+            }
+            box(shell, 'shell');
+            box(pill, 'inputPill');
+            box(r && r.firstElementChild, 'rootChild0');
+            var v = getComputedStyle(document.documentElement);
+            __beacon('cssvars containerBg=' + v.getPropertyValue('--clui-container-bg').trim() +
+                     ' inputPillBg=' + v.getPropertyValue('--clui-input-pill-bg').trim());
           }, 2000);
         });
       })();
