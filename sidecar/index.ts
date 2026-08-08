@@ -15,15 +15,19 @@ import { readFile } from 'node:fs/promises'
 import { appendFileSync } from 'node:fs'
 import { extname, join, normalize, sep } from 'node:path'
 import { homedir } from 'node:os'
-import { execFileSync } from 'node:child_process'
+import { execFile, execFileSync } from 'node:child_process'
+import { writeFile, readdir, readFile as readFileAsync, stat } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
 import { createInterface } from 'node:readline'
 import process from 'node:process'
+import { randomUUID } from 'node:crypto'
 
 import { IPC } from '../src/shared/types'
 import { getShortcuts } from '../src/shared/shortcuts'
 import { ControlPlane } from '../src/main/claude/control-plane'
 import { getCliRuntime, getAgentDataHomes, cliInvocation } from '../src/main/openclaw/runtime'
 import { getCliEnv } from '../src/main/cli-env'
+import { fetchCatalog, listInstalled, installPlugin, uninstallPlugin } from '../src/main/marketplace/catalog'
 
 const log = (...a: unknown[]) => console.error('[sidecar]', ...a)
 
@@ -121,6 +125,15 @@ controlPlane.on('tab-status-change', (tabId: string, newStatus: string, oldStatu
 controlPlane.on('error', (tabId: string, error: unknown) => {
   emit('clui:enriched-error', { tabId, error })
 })
+
+/** Launch something through the OS, replacing Electron's shell module. */
+function openWith(command: string, args: string[]) {
+  return new Promise<{ ok: boolean; error?: string }>((resolve) => {
+    execFile(command, args, { windowsHide: true }, (err) =>
+      resolve(err ? { ok: false, error: err.message } : { ok: true }),
+    )
+  })
+}
 
 /** Synchronous CLI call, as runCliSync did in the Electron main process. */
 function runCli(args: string[], timeoutMs = 5000) {
@@ -221,6 +234,120 @@ const handlers: Record<string, (args: any) => unknown | Promise<unknown>> = {
     controlPlane.setConnectionTarget({ mode })
     return { ok: true }
   },
+
+  // ── Window-layer channels ──
+  //
+  // The first four were already no-ops in the Electron main process: the native
+  // window is fixed-size and every expand/collapse happens inside the renderer.
+  // Kept so the surface is complete rather than erroring.
+  [IPC.RESIZE_HEIGHT]: () => true,
+  [IPC.SET_WINDOW_WIDTH]: () => true,
+  [IPC.ANIMATE_HEIGHT]: () => true,
+  [IPC.DRAG_HOLDING]: () => true,
+  // SET_IGNORE_MOUSE_EVENTS, HIDE_WINDOW, WINDOW_READY and WINDOW_DISMISS_READY
+  // are intercepted by the shim and handled by the shell, which owns the window.
+  [IPC.TRACE_SHELL]: () => true,
+  [IPC.SET_BRANDING]: () => true,
+
+  // ── Marketplace: the real catalog module, now Electron-free ──
+  [IPC.MARKETPLACE_FETCH]: ({ forceRefresh }: any) => fetchCatalog(forceRefresh),
+  [IPC.MARKETPLACE_INSTALLED]: () => listInstalled(),
+  [IPC.MARKETPLACE_INSTALL]: (a: any) => installPlugin(a),
+  [IPC.MARKETPLACE_UNINSTALL]: (a: any) => uninstallPlugin(a),
+
+  // ── CLI-backed channels ──
+  [IPC.OPENCLAW_HEALTH]: () => runCli(['doctor'], 20000),
+  [IPC.OPENCLAW_MODEL_INFO]: () => {
+    const r = runCli(['config', 'get', 'models'], 15000)
+    try {
+      return { ok: r.ok, models: JSON.parse(r.stdout) }
+    } catch {
+      return { ok: false, models: null, raw: r.stdout }
+    }
+  },
+  [IPC.OPENCLAW_SET_MODEL]: ({ model }: any) => runCli(['config', 'set', 'model', String(model)], 15000),
+  [IPC.OPENCLAW_ONBOARD]: () => runCli(['onboard'], 60000),
+  [IPC.OPENCLAW_RUN]: ({ args }: any) => runCli(Array.isArray(args) ? args.map(String) : [], 60000),
+  [IPC.NODE_STATUS]: () => runCli(['node', 'status'], 20000),
+  [IPC.NODE_ACTION]: ({ action }: any) => runCli(['node', String(action)], 30000),
+  [IPC.GATEWAY_STATUS]: () => runCli(['gateway', 'status'], 20000),
+  [IPC.GATEWAY_PROBE]: () => runCli(['gateway', 'probe'], 20000),
+  [IPC.GATEWAY_CONFIG_GET]: async () => {
+    try {
+      const raw = await readFileAsync(join(homedir(), '.openclaw', 'openclaw.json'), 'utf-8')
+      return { ok: true, config: JSON.parse(raw) }
+    } catch (err: any) {
+      return { ok: false, error: String(err?.message ?? err) }
+    }
+  },
+  [IPC.TRANSCRIBE_AUDIO]: ({ audioBase64 }: any) => {
+    // The CLI reads the clip from a file; a base64 blob on argv would blow the
+    // command-line length limit.
+    const file = join(tmpdir(), `clui-audio-${Date.now()}.webm`)
+    try {
+      require('node:fs').writeFileSync(file, Buffer.from(String(audioBase64), 'base64'))
+      const r = runCli(['transcribe', file], 60000)
+      return { error: r.ok ? null : 'transcription failed', transcript: r.ok ? r.stdout : null }
+    } catch (err: any) {
+      return { error: String(err?.message ?? err), transcript: null }
+    }
+  },
+
+  // ── Sessions: read the CLI's own session directories ──
+  [IPC.LIST_SESSIONS]: async () => {
+    const out: unknown[] = []
+    for (const home of getAgentDataHomes()) {
+      const root = join(home, 'projects')
+      try {
+        for (const dir of await readdir(root)) {
+          const full = join(root, dir)
+          try {
+            out.push({ project: dir, path: full, mtime: (await stat(full)).mtimeMs })
+          } catch {
+            // unreadable entry, skip
+          }
+        }
+      } catch {
+        // no projects dir under this home
+      }
+    }
+    return out
+  },
+  [IPC.LOAD_SESSION]: async ({ sessionId, projectPath }: any) => {
+    try {
+      return { ok: true, content: await readFileAsync(join(String(projectPath), `${sessionId}.jsonl`), 'utf-8') }
+    } catch (err: any) {
+      return { ok: false, error: String(err?.message ?? err) }
+    }
+  },
+
+  // ── Files ──
+  [IPC.PASTE_IMAGE]: async ({ dataUrl }: any) => {
+    const match = String(dataUrl).match(/^data:(image\/(\w+));base64,(.+)$/)
+    if (!match) return null
+    const [, mimeType, ext, b64] = match
+    const file = join(tmpdir(), `clui-paste-${Date.now()}.${ext}`)
+    const buf = Buffer.from(b64, 'base64')
+    await writeFile(file, buf)
+    return { id: randomUUID(), type: 'image', name: `pasted.${ext}`, path: file, mimeType, dataUrl, size: buf.length }
+  },
+  [IPC.EXPORT_CONVERSATION]: async ({ content, suggestedName }: any) => {
+    // No native save dialog in the sidecar, so write beside the CLI's data and
+    // hand back the path for the UI to reveal.
+    const file = join(homedir(), 'Downloads', String(suggestedName ?? `conversation-${Date.now()}.md`))
+    try {
+      await writeFile(file, String(content), 'utf-8')
+      return { ok: true, path: file }
+    } catch (err: any) {
+      return { ok: false, error: String(err?.message ?? err) }
+    }
+  },
+
+  // ── Shell open: no Electron shell module, but Windows ships equivalents ──
+  [IPC.OPEN_EXTERNAL]: ({ url }: any) => openWith('rundll32', ['url.dll,FileProtocolHandler', String(url)]),
+  [IPC.OPEN_PATH]: ({ path: target }: any) => openWith('explorer', [String(target)]),
+  [IPC.OPEN_IN_TERMINAL]: ({ projectPath }: any) =>
+    openWith(process.env.ComSpec ?? 'cmd.exe', ['/c', 'start', '', 'cmd', '/k', `cd /d "${String(projectPath)}"`]),
 
   ping: () => 'pong',
 

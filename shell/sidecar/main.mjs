@@ -7,13 +7,16 @@ var __require = /* @__PURE__ */ ((x) => typeof require !== "undefined" ? require
 
 // ../OpenClaw-UI-saucer/sidecar/index.ts
 import { createServer as createServer2 } from "node:http";
-import { readFile } from "node:fs/promises";
+import { readFile as readFile2 } from "node:fs/promises";
 import { appendFileSync as appendFileSync3 } from "node:fs";
-import { extname, join as join7, normalize as normalize2, sep } from "node:path";
+import { extname, join as join8, normalize as normalize2, sep } from "node:path";
 import { homedir as homedir6 } from "node:os";
-import { execFileSync } from "node:child_process";
+import { execFile as execFile2, execFileSync } from "node:child_process";
+import { writeFile as writeFile2, readdir as readdir2, readFile as readFileAsync, stat } from "node:fs/promises";
+import { tmpdir as tmpdir2 } from "node:os";
 import { createInterface } from "node:readline";
 import process2 from "node:process";
+import { randomUUID as randomUUID2 } from "node:crypto";
 
 // ../OpenClaw-UI-saucer/src/shared/types.ts
 var IPC = {
@@ -628,6 +631,9 @@ function cliInvocation(args) {
   const rt = getCliRuntime();
   return { command: rt.command, args: [...rt.prefixArgs, ...args] };
 }
+function findCliBinary() {
+  return getCliRuntime().command;
+}
 function getAgentDataHomes() {
   const envOverride = process.env[OPENCLAW_HOME_ENV]?.trim();
   return uniq([
@@ -635,6 +641,9 @@ function getAgentDataHomes() {
     join3(homedir3(), ".openclaw"),
     join3(homedir3(), ".claude")
   ]);
+}
+function getPrimaryAgentHome() {
+  return getAgentDataHomes()[0];
 }
 
 // ../OpenClaw-UI-saucer/src/main/claude/run-manager.ts
@@ -1960,7 +1969,7 @@ var PermissionServer = class extends EventEmitter4 {
       log4("Server already running");
       return this._actualPort || this.port;
     }
-    return new Promise((resolve, reject) => {
+    return new Promise((resolve2, reject) => {
       this.server = createServer((req, res) => this._handleRequest(req, res));
       this.server.on("error", (err) => {
         if (err.code === "EADDRINUSE") {
@@ -1975,7 +1984,7 @@ var PermissionServer = class extends EventEmitter4 {
       this.server.listen(this.port, "127.0.0.1", () => {
         this._actualPort = this.port;
         log4(`Permission server listening on 127.0.0.1:${this.port}`);
-        resolve(this.port);
+        resolve2(this.port);
       });
     });
   }
@@ -2221,15 +2230,15 @@ var PermissionServer = class extends EventEmitter4 {
       return;
     }
     const questionId = `hook-${Date.now()}-${Math.random().toString(36).substring(2, 8)}`;
-    const decision = await new Promise((resolve) => {
+    const decision = await new Promise((resolve2) => {
       const timeout = setTimeout(() => {
         log4(`Permission timeout [${questionId}] \u2014 auto-denying`);
         this.pendingRequests.delete(questionId);
-        resolve({ decision: "deny", reason: "Permission timed out after 5 minutes" });
+        resolve2({ decision: "deny", reason: "Permission timed out after 5 minutes" });
       }, PERMISSION_TIMEOUT_MS2);
       this.pendingRequests.set(questionId, {
         toolRequest,
-        resolve,
+        resolve: resolve2,
         timeout,
         questionId,
         runToken: urlToken
@@ -2658,8 +2667,8 @@ var ControlPlane = class extends EventEmitter5 {
     const queued = this.requestQueue.find((r) => r.requestId === requestId);
     if (queued) {
       log5(`Duplicate requestId ${requestId} \u2014 already queued, adding waiter`);
-      return new Promise((resolve, reject) => {
-        queued.extraWaiters.push({ resolve, reject });
+      return new Promise((resolve2, reject) => {
+        queued.extraWaiters.push({ resolve: resolve2, reject });
       });
     }
     if (tab.activeRequestId) {
@@ -2667,12 +2676,12 @@ var ControlPlane = class extends EventEmitter5 {
         throw new Error("Request queue full \u2014 back-pressure");
       }
       log5(`Tab ${tabId} busy \u2014 queuing request ${requestId} (queue depth: ${this.requestQueue.length + 1})`);
-      return new Promise((resolve, reject) => {
+      return new Promise((resolve2, reject) => {
         this.requestQueue.push({
           requestId,
           tabId,
           options,
-          resolve,
+          resolve: resolve2,
           reject,
           enqueuedAt: Date.now(),
           extraWaiters: []
@@ -2724,13 +2733,13 @@ var ControlPlane = class extends EventEmitter5 {
       this._setTabStatus(tabId, "failed");
       throw err;
     }
-    let resolve;
+    let resolve2;
     let reject;
     const promise = new Promise((res, rej) => {
-      resolve = res;
+      resolve2 = res;
       reject = rej;
     });
-    this.inflightRequests.set(requestId, { requestId, tabId, promise, resolve, reject });
+    this.inflightRequests.set(requestId, { requestId, tabId, promise, resolve: resolve2, reject });
     return promise;
   }
   // ─── Cancel ───
@@ -2860,8 +2869,412 @@ var ControlPlane = class extends EventEmitter5 {
   }
 };
 
+// ../OpenClaw-UI-saucer/src/main/marketplace/catalog.ts
+import { execFile } from "child_process";
+import { readFile, readdir, mkdir, writeFile, rm } from "fs/promises";
+import { join as join7, resolve } from "path";
+var SAFE_PLUGIN_NAME = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/;
+var SAFE_REPO = /^[a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+$/;
+function validatePluginName(name) {
+  return SAFE_PLUGIN_NAME.test(name) && !name.includes("..");
+}
+function validateRepo(repo) {
+  return SAFE_REPO.test(repo);
+}
+function validateSourcePath(p) {
+  if (!p || /[\0\\]/.test(p) || p.startsWith("/") || p.includes("..")) return false;
+  return true;
+}
+function assertSkillDirContained(skillsDir, base) {
+  const resolved = resolve(skillsDir);
+  if (!resolved.startsWith(base + "/") && resolved !== base) {
+    throw new Error(`Path escapes skills directory: ${resolved}`);
+  }
+}
+function log6(msg) {
+  log("marketplace", msg);
+}
+var SOURCES = [
+  { repo: "anthropics/skills", category: "Agent Skills" },
+  { repo: "anthropics/knowledge-work-plugins", category: "Knowledge Work" },
+  { repo: "anthropics/financial-services-plugins", category: "Financial Services" }
+];
+var AWESOME_REPO = "VoltAgent/awesome-openclaw-skills";
+var AWESOME_RAW_BASE = `https://raw.githubusercontent.com/${AWESOME_REPO}/main`;
+var AWESOME_README_URL = `${AWESOME_RAW_BASE}/README.md`;
+var AWESOME_LIST_LIMIT = 1400;
+var cachedPlugins = null;
+var cacheTimestamp = 0;
+var CACHE_TTL = 5 * 60 * 1e3;
+var skillContentCache = /* @__PURE__ */ new Map();
+async function fetchCatalog(forceRefresh) {
+  if (!forceRefresh && cachedPlugins && Date.now() - cacheTimestamp < CACHE_TTL) {
+    return { plugins: cachedPlugins, error: null };
+  }
+  const allPlugins = [];
+  const errors = [];
+  const results = await Promise.allSettled(
+    SOURCES.map(async (source) => {
+      const marketplaceUrl = `https://raw.githubusercontent.com/${source.repo}/main/.claude-plugin/marketplace.json`;
+      log6(`Fetching marketplace: ${marketplaceUrl}`);
+      const marketplaceRes = await netFetch(marketplaceUrl);
+      if (!marketplaceRes.ok) {
+        throw new Error(`Failed to fetch marketplace for ${source.repo}: ${marketplaceRes.status}`);
+      }
+      const marketplaceData = JSON.parse(marketplaceRes.body);
+      const safeMarketplaceName = typeof marketplaceData.name === "string" && marketplaceData.name.trim().length > 0 ? marketplaceData.name.trim() : source.repo;
+      const jobs = [];
+      for (const entry of marketplaceData.plugins) {
+        let entryAuthor = "";
+        if (entry.author) {
+          entryAuthor = typeof entry.author === "string" ? entry.author : entry.author.name || "";
+        }
+        if (entry.skills && entry.skills.length > 0) {
+          for (const skillRef of entry.skills) {
+            const skillPath = skillRef.replace(/^\.\//, "").replace(/\/$/, "");
+            const individualName = skillPath.split("/").pop() || entry.name;
+            jobs.push({
+              installName: individualName,
+              skillPath,
+              entryDescription: entry.description || "",
+              entryAuthor,
+              useSkillMd: true
+            });
+          }
+        } else {
+          const normalizedSource = entry.source.replace(/^\.\//, "").replace(/\/$/, "");
+          jobs.push({
+            installName: entry.name,
+            skillPath: normalizedSource || entry.name,
+            entryDescription: entry.description || "",
+            entryAuthor,
+            useSkillMd: false
+          });
+        }
+      }
+      const jobResults = await Promise.allSettled(
+        jobs.map(async (job) => {
+          let name = "";
+          let description = "";
+          let version = "0.0.0";
+          let author = job.entryAuthor || "Anthropic";
+          if (job.useSkillMd) {
+            const skillUrl = `https://raw.githubusercontent.com/${source.repo}/main/${job.skillPath}/SKILL.md`;
+            try {
+              const res = await netFetch(skillUrl);
+              if (res.ok) {
+                const parsed = parseSkillFrontmatter(res.body);
+                name = parsed.name;
+                description = parsed.description;
+                skillContentCache.set(job.installName, res.body);
+              }
+            } catch (e) {
+              log6(`SKILL.md fetch failed for ${job.skillPath}`);
+            }
+          } else {
+            const pluginUrl = `https://raw.githubusercontent.com/${source.repo}/main/${job.skillPath}/.claude-plugin/plugin.json`;
+            try {
+              const res = await netFetch(pluginUrl);
+              if (res.ok) {
+                const data = JSON.parse(res.body);
+                name = data.name?.trim() || "";
+                description = data.description || "";
+                version = data.version?.trim() || "0.0.0";
+                author = data.author?.trim() || author;
+              }
+            } catch (e) {
+              log6(`plugin.json fetch failed for ${job.skillPath}`);
+            }
+          }
+          const dirName = job.skillPath.split("/").pop() || job.installName;
+          if (!name) name = dirName;
+          if (!description) description = job.entryDescription;
+          const plugin = {
+            id: `${source.repo}/${job.skillPath}`,
+            name,
+            description,
+            version,
+            author,
+            marketplace: safeMarketplaceName,
+            repo: source.repo,
+            sourcePath: job.skillPath,
+            installName: job.installName,
+            category: source.category,
+            tags: deriveSemanticTags(name, description, job.skillPath),
+            isSkillMd: job.useSkillMd,
+            installMode: "native"
+          };
+          return plugin;
+        })
+      );
+      for (const r of jobResults) {
+        if (r.status === "fulfilled") {
+          allPlugins.push(r.value);
+        } else {
+          log6(`Plugin fetch warning: ${r.reason}`);
+        }
+      }
+    })
+  );
+  try {
+    const awesomePlugins = await fetchAwesomeOpenclawSkills();
+    allPlugins.push(...awesomePlugins);
+  } catch (err) {
+    const msg = `Awesome source fetch error: ${String(err)}`;
+    log6(msg);
+    errors.push(msg);
+  }
+  for (const r of results) {
+    if (r.status === "rejected") {
+      log6(`Source fetch error: ${r.reason}`);
+      errors.push(String(r.reason));
+    }
+  }
+  if (allPlugins.length === 0 && errors.length > 0) {
+    return { plugins: [], error: errors.join("; ") };
+  }
+  allPlugins.sort((a, b) => a.name.localeCompare(b.name));
+  cachedPlugins = allPlugins;
+  cacheTimestamp = Date.now();
+  return { plugins: allPlugins, error: null };
+}
+async function listInstalled() {
+  const cliHomeDir = getPrimaryAgentHome();
+  const names = [];
+  try {
+    const raw = await readFile(join7(cliHomeDir, "plugins", "installed_plugins.json"), "utf-8");
+    const data = JSON.parse(raw);
+    if (data.plugins) {
+      for (const key of Object.keys(data.plugins)) {
+        const pluginName = key.split("@")[0];
+        if (pluginName) names.push(pluginName);
+        names.push(key);
+      }
+    }
+  } catch (e) {
+    log6(`listInstalled: no installed_plugins.json or parse error: ${e}`);
+  }
+  try {
+    const entries = await readdir(join7(cliHomeDir, "skills"), { withFileTypes: true });
+    for (const entry of entries) {
+      if (entry.isDirectory()) {
+        names.push(entry.name);
+      }
+    }
+  } catch (e) {
+    log6(`listInstalled: no skills dir or read error: ${e}`);
+  }
+  return [...new Set(names)];
+}
+async function installPlugin(repo, pluginName, marketplace, sourcePath, isSkillMd) {
+  try {
+    if (!validatePluginName(pluginName)) {
+      return { ok: false, error: `Invalid plugin name: ${pluginName}` };
+    }
+    if (!validateRepo(repo)) {
+      return { ok: false, error: `Invalid repo format: ${repo}` };
+    }
+    if (sourcePath && !validateSourcePath(sourcePath)) {
+      return { ok: false, error: `Invalid source path: ${sourcePath}` };
+    }
+    if (repo === AWESOME_REPO || marketplace === "Awesome OpenClaw Skills") {
+      return { ok: false, error: "This skill is installed via ClawHub. Run: clawhub install <skill-slug>" };
+    }
+    if (isSkillMd !== false) {
+      const skillsBase = join7(getPrimaryAgentHome(), "skills");
+      const skillsDir = join7(skillsBase, pluginName);
+      assertSkillDirContained(skillsDir, skillsBase);
+      let content = skillContentCache.get(pluginName);
+      if (!content) {
+        const path = sourcePath || `skills/${pluginName}`;
+        const url = `https://raw.githubusercontent.com/${repo}/main/${path}/SKILL.md`;
+        log6(`installPlugin: fetching ${url}`);
+        const res = await netFetch(url);
+        if (!res.ok) {
+          return { ok: false, error: `Failed to fetch SKILL.md (${res.status})` };
+        }
+        content = res.body;
+      }
+      await mkdir(skillsDir, { recursive: true });
+      await writeFile(join7(skillsDir, "SKILL.md"), content, "utf-8");
+      log6(`installPlugin: wrote ${skillsDir}/SKILL.md`);
+    } else {
+      const cliBin = findCliBinary();
+      const addResult = await execAsync(cliBin, ["plugin", "marketplace", "add", repo], 15e3);
+      if (addResult.exitCode !== 0 && !addResult.stdout.includes("already added") && !addResult.stderr.includes("already added")) {
+        return { ok: false, error: addResult.stderr || "Failed to add marketplace" };
+      }
+      const marketplaceSlug = repo.split("/").pop() || marketplace;
+      let installResult = await execAsync(cliBin, ["plugin", "install", `${pluginName}@${marketplaceSlug}`], 15e3);
+      if (installResult.exitCode !== 0 && marketplaceSlug !== marketplace) {
+        installResult = await execAsync(cliBin, ["plugin", "install", `${pluginName}@${marketplace}`], 15e3);
+      }
+      if (installResult.exitCode !== 0) {
+        return { ok: false, error: installResult.stderr || installResult.stdout || "Failed to install plugin" };
+      }
+    }
+    return { ok: true };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    log6(`installPlugin error: ${msg}`);
+    return { ok: false, error: msg };
+  }
+}
+async function uninstallPlugin(pluginName) {
+  try {
+    if (!validatePluginName(pluginName)) {
+      return { ok: false, error: `Invalid plugin name: ${pluginName}` };
+    }
+    const skillsBase = join7(getPrimaryAgentHome(), "skills");
+    const skillsDir = join7(skillsBase, pluginName);
+    assertSkillDirContained(skillsDir, skillsBase);
+    await rm(skillsDir, { recursive: true, force: true });
+    log6(`uninstallPlugin: removed ${skillsDir}`);
+    return { ok: true };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    log6(`uninstallPlugin error: ${msg}`);
+    return { ok: false, error: msg };
+  }
+}
+async function netFetch(url) {
+  const response = await fetch(url);
+  return { ok: response.ok, status: response.status, body: await response.text() };
+}
+async function fetchAwesomeOpenclawSkills() {
+  const readmeRes = await netFetch(AWESOME_README_URL);
+  if (!readmeRes.ok) {
+    throw new Error(`Failed to fetch ${AWESOME_REPO} README (${readmeRes.status})`);
+  }
+  const categoryPaths = parseAwesomeCategoryPaths(readmeRes.body);
+  const categoryDocs = await Promise.allSettled(
+    categoryPaths.map(async (path) => {
+      const url = `${AWESOME_RAW_BASE}/${path}`;
+      const res = await netFetch(url);
+      if (!res.ok) throw new Error(`Failed to fetch ${url} (${res.status})`);
+      return { path, body: res.body };
+    })
+  );
+  const plugins = [];
+  for (const doc of categoryDocs) {
+    if (doc.status !== "fulfilled") {
+      log6(`Awesome category fetch warning: ${doc.reason}`);
+      continue;
+    }
+    const parsed = parseAwesomeCategory(doc.value.path, doc.value.body);
+    for (const p of parsed) {
+      plugins.push(p);
+      if (plugins.length >= AWESOME_LIST_LIMIT) return plugins;
+    }
+  }
+  return plugins;
+}
+function parseAwesomeCategoryPaths(readme) {
+  const matches = [...readme.matchAll(/\(categories\/([a-z0-9-]+\.md)\)/gi)];
+  const dedup = /* @__PURE__ */ new Set();
+  for (const m of matches) dedup.add(`categories/${m[1]}`);
+  return [...dedup];
+}
+function parseAwesomeCategory(path, body) {
+  const lines = body.split("\n");
+  const heading = lines.find((l) => l.startsWith("# "))?.replace(/^#\s+/, "").trim() || "Community";
+  const results = [];
+  for (const line of lines) {
+    const m = line.match(/^- \[([^\]]+)\]\((https:\/\/clawskills\.sh\/skills\/([^)\/\s]+))\)\s*-\s*(.+)$/i);
+    if (!m) continue;
+    const name = m[1].trim();
+    const externalUrl = m[2].trim();
+    const slug = m[3].trim().toLowerCase();
+    const description = m[4].trim();
+    const author = slug.includes("-") ? slug.split("-")[0] : "community";
+    const id = `${AWESOME_REPO}/${slug}`;
+    const tags = Array.from(/* @__PURE__ */ new Set(["Community", ...deriveSemanticTags(name, description, `${path}#${slug}`)]));
+    results.push({
+      id,
+      name,
+      description,
+      version: "community",
+      author,
+      marketplace: "Awesome OpenClaw Skills",
+      repo: AWESOME_REPO,
+      sourcePath: `${path}#${slug}`,
+      installName: slug,
+      category: heading,
+      tags,
+      isSkillMd: false,
+      installMode: "clawhub",
+      installCommand: `clawhub install ${slug}`,
+      externalUrl
+    });
+  }
+  return results;
+}
+function parseSkillFrontmatter(content) {
+  let name = "";
+  let description = "";
+  const lines = content.split("\n");
+  for (const line of lines) {
+    const nameMatch = line.match(/^name:\s*(.+)/);
+    if (nameMatch && !name) {
+      name = nameMatch[1].replace(/^["']|["']$/g, "").trim();
+    }
+    const descMatch = line.match(/^description:\s*(.+)/);
+    if (descMatch && !description) {
+      description = descMatch[1].replace(/^["']|["']$/g, "").trim();
+      if (description.length > 200) {
+        description = description.substring(0, 197) + "...";
+      }
+    }
+    if (name && description) break;
+    if (line.startsWith("# ")) break;
+  }
+  return { name, description };
+}
+var TAG_RULES = [
+  { tag: "Design", patterns: /\b(figma|ui|ux|design|sketch|prototype|wireframe|layout|css|style|visual)\b/i },
+  { tag: "Product", patterns: /\b(prd|roadmap|strategy|product|backlog|prioriti[sz]|feature\s*request|user\s*stor)\b/i },
+  { tag: "Research", patterns: /\b(research|interview|insights?|survey|user\s*study|ethnograph|discover)\b/i },
+  { tag: "Docs", patterns: /\b(doc(ument)?s?|writing|spec(ification)?|readme|markdown|technical\s*writ|content)\b/i },
+  { tag: "Spreadsheet", patterns: /\b(sheet|spreadsheet|xlsx?|csv|tabular|pivot|formula)\b/i },
+  { tag: "Slides", patterns: /\b(slides?|presentation|deck|pptx?|keynote|pitch)\b/i },
+  { tag: "Analysis", patterns: /\b(analy[sz](is|e|ing)|insight|metric|dashboard|report(ing)?|data\s*viz|statistic)\b/i },
+  { tag: "Finance", patterns: /\b(financ|accounting|budget|revenue|forecast|valuation|portfolio|investment)\b/i },
+  { tag: "Compliance", patterns: /\b(risk|audit|policy|compliance|regulat|governance|sox|gdpr|hipaa)\b/i },
+  { tag: "Management", patterns: /\b(manag|planning|meeting|ops|operations|team|workflow|project\s*plan)\b/i },
+  { tag: "Automation", patterns: /\b(automat|workflow|pipeline|ci\s*cd|deploy|integrat|orchestrat|script)\b/i },
+  { tag: "Code", patterns: /\b(code|coding|program|develop|engineer|debug|refactor|test(ing)?|linter?)\b/i },
+  { tag: "Creative", patterns: /\b(creative|brainstorm|ideation|copywriting|storytelling|narrative)\b/i },
+  { tag: "Sales", patterns: /\b(sales|crm|prospect|lead|deal|pipeline|outreach|cold\s*(call|email))\b/i },
+  { tag: "Support", patterns: /\b(support|customer|helpdesk|ticket|troubleshoot|faq|knowledge\s*base)\b/i },
+  { tag: "Security", patterns: /\b(secur|vulnerabilit|pentest|threat|encrypt|auth(enticat|ori[sz]))\b/i },
+  { tag: "Data", patterns: /\b(data|database|sql|etl|warehouse|lake|ingest|transform|schema)\b/i },
+  { tag: "AI/ML", patterns: /\b(ai|ml|machine\s*learn|model|train|inference|llm|prompt|embed)\b/i }
+];
+function deriveSemanticTags(name, description, skillPath) {
+  const text = `${name} ${description} ${skillPath}`.toLowerCase();
+  const matched = [];
+  for (const rule of TAG_RULES) {
+    if (rule.patterns.test(text)) {
+      matched.push(rule.tag);
+    }
+    if (matched.length >= 2) break;
+  }
+  return matched;
+}
+function execAsync(cmd, args, timeout) {
+  return new Promise((resolve2) => {
+    execFile(cmd, args, { timeout, env: getCliEnv() }, (err, stdout, stderr) => {
+      resolve2({
+        exitCode: err ? 1 : 0,
+        stdout: stdout || "",
+        stderr: stderr || ""
+      });
+    });
+  });
+}
+
 // ../OpenClaw-UI-saucer/sidecar/index.ts
-var log6 = (...a) => console.error("[sidecar]", ...a);
+var log7 = (...a) => console.error("[sidecar]", ...a);
 function send(msg) {
   process2.stdout.write(JSON.stringify(msg) + "\n");
 }
@@ -2887,9 +3300,9 @@ function startWebServer() {
       const url = new URL(req.url ?? "/", "http://127.0.0.1");
       if (url.pathname === "/__log") {
         const line = url.searchParams.get("m") ?? "";
-        log6("[page]", line);
+        log7("[page]", line);
         try {
-          appendFileSync3(join7(WEB_ROOT, "page.log"), `${line}
+          appendFileSync3(join8(WEB_ROOT, "page.log"), `${line}
 `);
         } catch {
         }
@@ -2897,22 +3310,22 @@ function startWebServer() {
         return;
       }
       const rel = decodeURIComponent(url.pathname === "/" ? "/index.html" : url.pathname);
-      const full = normalize2(join7(WEB_ROOT, rel));
+      const full = normalize2(join8(WEB_ROOT, rel));
       if (!full.startsWith(normalize2(WEB_ROOT) + sep)) {
         res.writeHead(403).end("forbidden");
         return;
       }
-      const body = await readFile(full);
+      const body = await readFile2(full);
       res.writeHead(200, { "Content-Type": MIME[extname(full).toLowerCase()] ?? "application/octet-stream" });
       res.end(body);
     } catch {
       res.writeHead(404).end("not found");
     }
   });
-  return new Promise((resolve) => {
+  return new Promise((resolve2) => {
     server.listen(WEB_PORT, "127.0.0.1", () => {
-      log6(`serving ${WEB_ROOT} on http://127.0.0.1:${WEB_PORT}`);
-      resolve();
+      log7(`serving ${WEB_ROOT} on http://127.0.0.1:${WEB_PORT}`);
+      resolve2();
     });
   });
 }
@@ -2927,6 +3340,16 @@ controlPlane.on("tab-status-change", (tabId, newStatus, oldStatus) => {
 controlPlane.on("error", (tabId, error) => {
   emit("clui:enriched-error", { tabId, error });
 });
+function openWith(command, args) {
+  return new Promise((resolve2) => {
+    execFile2(
+      command,
+      args,
+      { windowsHide: true },
+      (err) => resolve2(err ? { ok: false, error: err.message } : { ok: true })
+    );
+  });
+}
 function runCli(args, timeoutMs = 5e3) {
   const { command, args: full } = cliInvocation(args);
   try {
@@ -3020,6 +3443,107 @@ var handlers = {
     controlPlane.setConnectionTarget({ mode });
     return { ok: true };
   },
+  // ── Window-layer channels ──
+  //
+  // The first four were already no-ops in the Electron main process: the native
+  // window is fixed-size and every expand/collapse happens inside the renderer.
+  // Kept so the surface is complete rather than erroring.
+  [IPC.RESIZE_HEIGHT]: () => true,
+  [IPC.SET_WINDOW_WIDTH]: () => true,
+  [IPC.ANIMATE_HEIGHT]: () => true,
+  [IPC.DRAG_HOLDING]: () => true,
+  // SET_IGNORE_MOUSE_EVENTS, HIDE_WINDOW, WINDOW_READY and WINDOW_DISMISS_READY
+  // are intercepted by the shim and handled by the shell, which owns the window.
+  [IPC.TRACE_SHELL]: () => true,
+  [IPC.SET_BRANDING]: () => true,
+  // ── Marketplace: the real catalog module, now Electron-free ──
+  [IPC.MARKETPLACE_FETCH]: ({ forceRefresh }) => fetchCatalog(forceRefresh),
+  [IPC.MARKETPLACE_INSTALLED]: () => listInstalled(),
+  [IPC.MARKETPLACE_INSTALL]: (a) => installPlugin(a),
+  [IPC.MARKETPLACE_UNINSTALL]: (a) => uninstallPlugin(a),
+  // ── CLI-backed channels ──
+  [IPC.OPENCLAW_HEALTH]: () => runCli(["doctor"], 2e4),
+  [IPC.OPENCLAW_MODEL_INFO]: () => {
+    const r = runCli(["config", "get", "models"], 15e3);
+    try {
+      return { ok: r.ok, models: JSON.parse(r.stdout) };
+    } catch {
+      return { ok: false, models: null, raw: r.stdout };
+    }
+  },
+  [IPC.OPENCLAW_SET_MODEL]: ({ model }) => runCli(["config", "set", "model", String(model)], 15e3),
+  [IPC.OPENCLAW_ONBOARD]: () => runCli(["onboard"], 6e4),
+  [IPC.OPENCLAW_RUN]: ({ args }) => runCli(Array.isArray(args) ? args.map(String) : [], 6e4),
+  [IPC.NODE_STATUS]: () => runCli(["node", "status"], 2e4),
+  [IPC.NODE_ACTION]: ({ action }) => runCli(["node", String(action)], 3e4),
+  [IPC.GATEWAY_STATUS]: () => runCli(["gateway", "status"], 2e4),
+  [IPC.GATEWAY_PROBE]: () => runCli(["gateway", "probe"], 2e4),
+  [IPC.GATEWAY_CONFIG_GET]: async () => {
+    try {
+      const raw = await readFileAsync(join8(homedir6(), ".openclaw", "openclaw.json"), "utf-8");
+      return { ok: true, config: JSON.parse(raw) };
+    } catch (err) {
+      return { ok: false, error: String(err?.message ?? err) };
+    }
+  },
+  [IPC.TRANSCRIBE_AUDIO]: ({ audioBase64 }) => {
+    const file = join8(tmpdir2(), `clui-audio-${Date.now()}.webm`);
+    try {
+      __require("node:fs").writeFileSync(file, Buffer.from(String(audioBase64), "base64"));
+      const r = runCli(["transcribe", file], 6e4);
+      return { error: r.ok ? null : "transcription failed", transcript: r.ok ? r.stdout : null };
+    } catch (err) {
+      return { error: String(err?.message ?? err), transcript: null };
+    }
+  },
+  // ── Sessions: read the CLI's own session directories ──
+  [IPC.LIST_SESSIONS]: async () => {
+    const out = [];
+    for (const home of getAgentDataHomes()) {
+      const root = join8(home, "projects");
+      try {
+        for (const dir of await readdir2(root)) {
+          const full = join8(root, dir);
+          try {
+            out.push({ project: dir, path: full, mtime: (await stat(full)).mtimeMs });
+          } catch {
+          }
+        }
+      } catch {
+      }
+    }
+    return out;
+  },
+  [IPC.LOAD_SESSION]: async ({ sessionId, projectPath }) => {
+    try {
+      return { ok: true, content: await readFileAsync(join8(String(projectPath), `${sessionId}.jsonl`), "utf-8") };
+    } catch (err) {
+      return { ok: false, error: String(err?.message ?? err) };
+    }
+  },
+  // ── Files ──
+  [IPC.PASTE_IMAGE]: async ({ dataUrl }) => {
+    const match = String(dataUrl).match(/^data:(image\/(\w+));base64,(.+)$/);
+    if (!match) return null;
+    const [, mimeType, ext, b64] = match;
+    const file = join8(tmpdir2(), `clui-paste-${Date.now()}.${ext}`);
+    const buf = Buffer.from(b64, "base64");
+    await writeFile2(file, buf);
+    return { id: randomUUID2(), type: "image", name: `pasted.${ext}`, path: file, mimeType, dataUrl, size: buf.length };
+  },
+  [IPC.EXPORT_CONVERSATION]: async ({ content, suggestedName }) => {
+    const file = join8(homedir6(), "Downloads", String(suggestedName ?? `conversation-${Date.now()}.md`));
+    try {
+      await writeFile2(file, String(content), "utf-8");
+      return { ok: true, path: file };
+    } catch (err) {
+      return { ok: false, error: String(err?.message ?? err) };
+    }
+  },
+  // ── Shell open: no Electron shell module, but Windows ships equivalents ──
+  [IPC.OPEN_EXTERNAL]: ({ url }) => openWith("rundll32", ["url.dll,FileProtocolHandler", String(url)]),
+  [IPC.OPEN_PATH]: ({ path: target }) => openWith("explorer", [String(target)]),
+  [IPC.OPEN_IN_TERMINAL]: ({ projectPath }) => openWith(process2.env.ComSpec ?? "cmd.exe", ["/c", "start", "", "cmd", "/k", `cd /d "${String(projectPath)}"`]),
   ping: () => "pong",
   /** Introspection so the UI can show exactly how much of the surface is live. */
   "sidecar:channels": () => {
@@ -3035,7 +3559,7 @@ createInterface({ input: process2.stdin }).on("line", async (line) => {
   try {
     req = JSON.parse(trimmed);
   } catch {
-    log6("unparseable line:", trimmed.slice(0, 120));
+    log7("unparseable line:", trimmed.slice(0, 120));
     return;
   }
   const handler = handlers[req.channel];
@@ -3049,7 +3573,7 @@ createInterface({ input: process2.stdin }).on("line", async (line) => {
     send({ id: req.id, ok: false, error: String(err?.message ?? err) });
   }
 }).on("close", () => {
-  log6("stdin closed, shutting down");
+  log7("stdin closed, shutting down");
   try {
     controlPlane.shutdown();
   } catch {
@@ -3060,6 +3584,6 @@ await startWebServer();
 {
   const all = Object.values(IPC);
   const wired = Object.keys(handlers).filter((k) => all.includes(k)).length;
-  log6(`ready on node ${process2.version}; ${wired}/${all.length} channels wired`);
+  log7(`ready on node ${process2.version}; ${wired}/${all.length} channels wired`);
   emit("sidecar:ready", { nodeVersion: process2.version, wired, total: all.length, webPort: WEB_PORT });
 }
