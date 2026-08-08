@@ -122,6 +122,8 @@ coco::stray start(saucer::application *app)
     window->set_always_on_top(true);
     window->set_background(kTransparent);
     view->set_background(kTransparent);
+    // DevTools on demand: CLUI_DEVTOOLS=1 (it covers the launcher when open).
+    if (const char *dt = std::getenv("CLUI_DEVTOOLS"); dt && *dt == char(49)) view->set_dev_tools(true);
 
     const auto index = saucer::url::from(exe_dir() / "index.html");
     if (!index.has_value())

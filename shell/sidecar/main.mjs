@@ -8,6 +8,7 @@ var __require = /* @__PURE__ */ ((x) => typeof require !== "undefined" ? require
 // ../OpenClaw-UI-saucer/sidecar/index.ts
 import { createServer as createServer2 } from "node:http";
 import { readFile } from "node:fs/promises";
+import { appendFileSync as appendFileSync3 } from "node:fs";
 import { extname, join as join7, normalize as normalize2, sep } from "node:path";
 import { homedir as homedir6 } from "node:os";
 import { execFileSync } from "node:child_process";
@@ -2884,6 +2885,17 @@ function startWebServer() {
   const server = createServer2(async (req, res) => {
     try {
       const url = new URL(req.url ?? "/", "http://127.0.0.1");
+      if (url.pathname === "/__log") {
+        const line = url.searchParams.get("m") ?? "";
+        log6("[page]", line);
+        try {
+          appendFileSync3(join7(WEB_ROOT, "page.log"), `${line}
+`);
+        } catch {
+        }
+        res.writeHead(204).end();
+        return;
+      }
       const rel = decodeURIComponent(url.pathname === "/" ? "/index.html" : url.pathname);
       const full = normalize2(join7(WEB_ROOT, rel));
       if (!full.startsWith(normalize2(WEB_ROOT) + sep)) {
@@ -2963,6 +2975,16 @@ var handlers = {
     };
   },
   [IPC.CREATE_TAB]: () => ({ tabId: controlPlane.createTab() }),
+  // The theme drives every colour in the UI. App.tsx swallows a getTheme
+  // rejection with .catch(() => {}), so a missing channel here does not throw —
+  // it just renders the whole launcher with no palette, which looks exactly
+  // like the app failing to mount. Dark is the shell's default background.
+  [IPC.GET_THEME]: () => ({ isDark: true }),
+  // Cheap, self-contained channels the UI touches early. Each returns the same
+  // shape the Electron handler did; none of them need a window.
+  [IPC.IS_VISIBLE]: () => true,
+  [IPC.GET_DIAGNOSTICS]: () => ({ platform: process2.platform, node: process2.version }),
+  [IPC.GET_RUNTIME_METRICS]: () => ({ cpu: 0, memory: process2.memoryUsage().rss }),
   [IPC.GET_SHORTCUTS]: () => ({ platform: process2.platform, shortcuts: getShortcuts(process2.platform) }),
   // ── Prompts, PTY and the CLI event stream: the reason this process exists ──
   [IPC.PROMPT]: async ({ tabId, requestId, options }) => {

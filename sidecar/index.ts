@@ -12,6 +12,7 @@
 
 import { createServer } from 'node:http'
 import { readFile } from 'node:fs/promises'
+import { appendFileSync } from 'node:fs'
 import { extname, join, normalize, sep } from 'node:path'
 import { homedir } from 'node:os'
 import { execFileSync } from 'node:child_process'
@@ -63,6 +64,22 @@ function startWebServer() {
   const server = createServer(async (req, res) => {
     try {
       const url = new URL(req.url ?? '/', 'http://127.0.0.1')
+
+      // Diagnostic sink. The page beacons here instead of through saucer's
+      // exposed functions, so it works even if the JS bridge is the thing
+      // that is broken — which is exactly what needs ruling in or out.
+      if (url.pathname === '/__log') {
+        const line = url.searchParams.get('m') ?? ''
+        log('[page]', line)
+        try {
+          appendFileSync(join(WEB_ROOT, 'page.log'), `${line}\n`)
+        } catch {
+          // diagnostics must never take the server down
+        }
+        res.writeHead(204).end()
+        return
+      }
+
       const rel = decodeURIComponent(url.pathname === '/' ? '/index.html' : url.pathname)
 
       // Contain every request inside WEB_ROOT.
@@ -166,6 +183,18 @@ const handlers: Record<string, (args: any) => unknown | Promise<unknown>> = {
   },
 
   [IPC.CREATE_TAB]: () => ({ tabId: controlPlane.createTab() }),
+
+  // The theme drives every colour in the UI. App.tsx swallows a getTheme
+  // rejection with .catch(() => {}), so a missing channel here does not throw —
+  // it just renders the whole launcher with no palette, which looks exactly
+  // like the app failing to mount. Dark is the shell's default background.
+  [IPC.GET_THEME]: () => ({ isDark: true }),
+
+  // Cheap, self-contained channels the UI touches early. Each returns the same
+  // shape the Electron handler did; none of them need a window.
+  [IPC.IS_VISIBLE]: () => true,
+  [IPC.GET_DIAGNOSTICS]: () => ({ platform: process.platform, node: process.version }),
+  [IPC.GET_RUNTIME_METRICS]: () => ({ cpu: 0, memory: process.memoryUsage().rss }),
   [IPC.GET_SHORTCUTS]: () => ({ platform: process.platform, shortcuts: getShortcuts(process.platform) }),
 
   // ── Prompts, PTY and the CLI event stream: the reason this process exists ──

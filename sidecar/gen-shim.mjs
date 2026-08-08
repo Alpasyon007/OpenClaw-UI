@@ -24,6 +24,20 @@ for (const m of types.matchAll(/^\s+([A-Z0-9_]+):\s*'([^']+)'/gm)) {
   channels.set(m[1], m[2])
 }
 
+/**
+ * The preload is TypeScript, so its parameter lists carry annotations —
+ * `projectPath?: string` is not valid JavaScript and silently breaks the whole
+ * shim with a SyntaxError, leaving window.clui undefined. Keep only the
+ * identifiers.
+ */
+const stripTypes = (params) =>
+  params
+    .split(',')
+    .map((p) => p.trim())
+    .filter(Boolean)
+    .map((p) => p.replace(/[?:].*$/, '').replace(/^\.\.\./, '...').trim())
+    .join(', ')
+
 const resolve = (name) => {
   const wire = channels.get(name)
   if (!wire) throw new Error(`no IPC constant named ${name} in shared/types.ts`)
@@ -42,7 +56,7 @@ for (const m of preload.matchAll(
   invokes.push({
     name,
     channel: constName ? resolve(constName) : literal,
-    params: params.trim(),
+    params: stripTypes(params),
     payload: (payload ?? '').trim(),
   })
 }
@@ -55,7 +69,7 @@ for (const m of preload.matchAll(
   sends.push({
     name,
     channel: constName ? resolve(constName) : literal,
-    params: params.trim(),
+    params: stripTypes(params),
     payload: (payload ?? '').trim(),
   })
 }

@@ -1,6 +1,44 @@
 <!DOCTYPE html>
 <html lang="en" class="dark">
   <head>
+    <script>
+      // Diagnostic beacon. Deliberately inline and deliberately NOT using
+      // saucer's exposed functions: the JS bridge is one of the suspects, so
+      // reporting has to work without it. The sidecar's HTTP server is already
+      // proven, so an image request is the most robust channel available.
+      (function () {
+        window.__beacon = function (m) {
+          try { new Image().src = '/__log?m=' + encodeURIComponent(String(m)) + '&t=' + Date.now(); } catch (e) {}
+        };
+        __beacon('inline script ran; saucer=' + (typeof window.saucer));
+        window.addEventListener('error', function (e) {
+          __beacon('ERROR ' + (e.message || e.error) + ' @ ' + (e.filename || '?') + ':' + e.lineno + ':' + e.colno);
+        }, true);
+        window.addEventListener('unhandledrejection', function (e) {
+          __beacon('REJECT ' + ((e.reason && (e.reason.stack || e.reason.message)) || e.reason));
+        });
+        ['error', 'warn'].forEach(function (lvl) {
+          var orig = console[lvl];
+          console[lvl] = function () {
+            __beacon(lvl.toUpperCase() + ' ' + Array.prototype.map.call(arguments, String).join(' '));
+            return orig.apply(console, arguments);
+          };
+        });
+        document.addEventListener('DOMContentLoaded', function () {
+          __beacon('DOMContentLoaded; saucer=' + (typeof window.saucer) +
+                   ' exposed=' + (window.saucer && typeof window.saucer.exposed) +
+                   ' clui=' + (typeof window.clui));
+        });
+        window.addEventListener('load', function () {
+          setTimeout(function () {
+            var r = document.getElementById('root');
+            __beacon('load+2s; rootChildren=' + (r ? r.childElementCount : 'NO ROOT') +
+                     ' clui=' + (typeof window.clui) +
+                     ' exposed=' + (window.saucer && typeof window.saucer.exposed));
+          }, 2000);
+        });
+      })();
+    </script>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>OpenClaw UI</title>
