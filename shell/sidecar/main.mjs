@@ -8,7 +8,7 @@ var __require = /* @__PURE__ */ ((x) => typeof require !== "undefined" ? require
 // ../OpenClaw-UI-saucer/sidecar/index.ts
 import { createServer as createServer2 } from "node:http";
 import { readFile as readFile2 } from "node:fs/promises";
-import { appendFileSync as appendFileSync3 } from "node:fs";
+import { appendFileSync as appendFileSync3, readFileSync as readFileSyncNode } from "node:fs";
 import { extname, join as join8, normalize as normalize2, sep } from "node:path";
 import { homedir as homedir6 } from "node:os";
 import { execFile as execFile2, execFileSync } from "node:child_process";
@@ -3340,6 +3340,13 @@ controlPlane.on("tab-status-change", (tabId, newStatus, oldStatus) => {
 controlPlane.on("error", (tabId, error) => {
   emit("clui:enriched-error", { tabId, error });
 });
+function readOpenclawConfig() {
+  try {
+    return JSON.parse(readFileSyncNode(join8(homedir6(), ".openclaw", "openclaw.json"), "utf-8"));
+  } catch {
+    return {};
+  }
+}
 function openWith(command, args) {
   return new Promise((resolve2) => {
     execFile2(
@@ -3439,8 +3446,27 @@ var handlers = {
   [IPC.STATUS]: () => controlPlane.getHealth(),
   [IPC.TAB_HEALTH]: ({ tabId }) => controlPlane.getTabStatus(tabId) ?? null,
   [IPC.GET_CONNECTION_TARGET]: () => controlPlane.getConnectionTarget(),
-  [IPC.SET_CONNECTION_TARGET]: ({ mode }) => {
-    controlPlane.setConnectionTarget({ mode });
+  [IPC.SET_CONNECTION_TARGET]: (target) => {
+    if (target?.mode !== "gateway" || !target?.url) {
+      controlPlane.setConnectionTarget({ mode: target?.mode });
+      return { ok: true };
+    }
+    const config = readOpenclawConfig();
+    const tokenEnvVar = config.gateway?.remote?.token?.id || null;
+    const envToken = tokenEnvVar && process2.env[tokenEnvVar] || void 0;
+    if (config.gateway?.mode === "remote" && config.gateway?.remote?.url === target.url && envToken) {
+      controlPlane.setConnectionTarget({ mode: "gateway", url: target.url, viaConfig: true });
+      return { ok: true };
+    }
+    const token = target.token || envToken;
+    if (!token && !target.password) {
+      return {
+        ok: false,
+        error: "No gateway credential available \u2014 set the token environment variable referenced by gateway.remote.token"
+      };
+    }
+    log7("connection target set with an explicit credential; config does not describe this gateway");
+    controlPlane.setConnectionTarget({ ...target, token });
     return { ok: true };
   },
   // ── Window-layer channels ──
@@ -3478,13 +3504,18 @@ var handlers = {
   [IPC.NODE_ACTION]: ({ action }) => runCli(["node", String(action)], 3e4),
   [IPC.GATEWAY_STATUS]: () => runCli(["gateway", "status"], 2e4),
   [IPC.GATEWAY_PROBE]: () => runCli(["gateway", "probe"], 2e4),
-  [IPC.GATEWAY_CONFIG_GET]: async () => {
-    try {
-      const raw = await readFileAsync(join8(homedir6(), ".openclaw", "openclaw.json"), "utf-8");
-      return { ok: true, config: JSON.parse(raw) };
-    } catch (err) {
-      return { ok: false, error: String(err?.message ?? err) };
-    }
+  [IPC.GATEWAY_CONFIG_GET]: () => {
+    const config = readOpenclawConfig();
+    const tokenEnvVar = config.gateway?.remote?.token?.id || "OPENCLAW_REMOTE_TOKEN";
+    return {
+      ok: true,
+      mode: config.gateway?.mode ?? "local",
+      url: config.gateway?.remote?.url ?? null,
+      bind: config.gateway?.bind ?? null,
+      tokenEnvVar,
+      tokenResolved: !!process2.env[tokenEnvVar],
+      config
+    };
   },
   [IPC.TRANSCRIBE_AUDIO]: ({ audioBase64 }) => {
     const file = join8(tmpdir2(), `clui-audio-${Date.now()}.webm`);

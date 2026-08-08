@@ -12,7 +12,7 @@
 
 import { createServer } from 'node:http'
 import { readFile } from 'node:fs/promises'
-import { appendFileSync } from 'node:fs'
+import { appendFileSync, readFileSync as readFileSyncNode } from 'node:fs'
 import { extname, join, normalize, sep } from 'node:path'
 import { homedir } from 'node:os'
 import { execFile, execFileSync } from 'node:child_process'
@@ -126,6 +126,19 @@ controlPlane.on('error', (tabId: string, error: unknown) => {
   emit('clui:enriched-error', { tabId, error })
 })
 
+type OpenclawConfig = {
+  gateway?: { mode?: string; bind?: string; remote?: { enabled?: boolean; url?: string; token?: { id?: string } } }
+}
+
+/** Read ~/.openclaw/openclaw.json. Never throws; a missing file is just {}. */
+function readOpenclawConfig(): OpenclawConfig {
+  try {
+    return JSON.parse(readFileSyncNode(join(homedir(), '.openclaw', 'openclaw.json'), 'utf-8'))
+  } catch {
+    return {}
+  }
+}
+
 /** Launch something through the OS, replacing Electron's shell module. */
 function openWith(command: string, args: string[]) {
   return new Promise<{ ok: boolean; error?: string }>((resolve) => {
@@ -230,8 +243,40 @@ const handlers: Record<string, (args: any) => unknown | Promise<unknown>> = {
   [IPC.STATUS]: () => controlPlane.getHealth(),
   [IPC.TAB_HEALTH]: ({ tabId }: any) => controlPlane.getTabStatus(tabId) ?? null,
   [IPC.GET_CONNECTION_TARGET]: () => controlPlane.getConnectionTarget(),
-  [IPC.SET_CONNECTION_TARGET]: ({ mode }: any) => {
-    controlPlane.setConnectionTarget({ mode })
+  [IPC.SET_CONNECTION_TARGET]: (target: any) => {
+    // Ported from src/main/index.ts:2286-2328. The previous one-liner passed
+    // only `mode` and dropped url/token/viaConfig, so a gateway target was
+    // never actually configured — the app could not see a running node.
+    if (target?.mode !== 'gateway' || !target?.url) {
+      controlPlane.setConnectionTarget({ mode: target?.mode })
+      return { ok: true }
+    }
+
+    const config = readOpenclawConfig()
+    const tokenEnvVar = config.gateway?.remote?.token?.id || null
+    const envToken = (tokenEnvVar && process.env[tokenEnvVar]) || undefined
+
+    // Preferred path: openclaw.json already names this gateway and its
+    // credential resolves, so the run needs no flags and the token stays out
+    // of the process table. gateway.mode must be 'remote' — it is the only key
+    // the CLI consults when deciding to route remotely.
+    if (config.gateway?.mode === 'remote' && config.gateway?.remote?.url === target.url && envToken) {
+      controlPlane.setConnectionTarget({ mode: 'gateway', url: target.url, viaConfig: true })
+      return { ok: true }
+    }
+
+    // Fallback: pass the credential explicitly. The CLI rejects --url without
+    // one, at the cost of argv exposure.
+    const token = target.token || envToken
+    if (!token && !target.password) {
+      return {
+        ok: false,
+        error:
+          'No gateway credential available — set the token environment variable referenced by gateway.remote.token',
+      }
+    }
+    log('connection target set with an explicit credential; config does not describe this gateway')
+    controlPlane.setConnectionTarget({ ...target, token })
     return { ok: true }
   },
 
@@ -272,12 +317,20 @@ const handlers: Record<string, (args: any) => unknown | Promise<unknown>> = {
   [IPC.NODE_ACTION]: ({ action }: any) => runCli(['node', String(action)], 30000),
   [IPC.GATEWAY_STATUS]: () => runCli(['gateway', 'status'], 20000),
   [IPC.GATEWAY_PROBE]: () => runCli(['gateway', 'probe'], 20000),
-  [IPC.GATEWAY_CONFIG_GET]: async () => {
-    try {
-      const raw = await readFileAsync(join(homedir(), '.openclaw', 'openclaw.json'), 'utf-8')
-      return { ok: true, config: JSON.parse(raw) }
-    } catch (err: any) {
-      return { ok: false, error: String(err?.message ?? err) }
+  [IPC.GATEWAY_CONFIG_GET]: () => {
+    // Report whether the credential actually resolves, not just whether the
+    // config names one: a config that references a missing env var looks
+    // configured but cannot connect.
+    const config = readOpenclawConfig()
+    const tokenEnvVar = config.gateway?.remote?.token?.id || 'OPENCLAW_REMOTE_TOKEN'
+    return {
+      ok: true,
+      mode: config.gateway?.mode ?? 'local',
+      url: config.gateway?.remote?.url ?? null,
+      bind: config.gateway?.bind ?? null,
+      tokenEnvVar,
+      tokenResolved: !!process.env[tokenEnvVar],
+      config,
     }
   },
   [IPC.TRANSCRIBE_AUDIO]: ({ audioBase64 }: any) => {
