@@ -44,6 +44,11 @@ FetchContent_MakeAvailable(saucer)
 
 target_link_libraries(${PROJECT_NAME} PRIVATE saucer::saucer)
 
+# Native file dialogs and GDI+ screen capture.
+if (WIN32)
+  target_link_libraries(${PROJECT_NAME} PRIVATE comdlg32 shell32 ole32 gdiplus)
+endif()
+
 # Reaching window->native().hwnd means including saucer's WebView2 backend
 # header, which includes WebView2.h. saucer links the SDK privately, so its
 # include directory is not propagated — pull it from the NuGet package saucer

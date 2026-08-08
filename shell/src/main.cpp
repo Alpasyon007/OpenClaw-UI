@@ -30,6 +30,7 @@
 #include <saucer/smartview.hpp>
 
 #include "sidecar.hpp"
+#include "native_ui.hpp"
 
 #ifdef _WIN32
 #include <windows.h>
@@ -161,6 +162,34 @@ coco::stray start(saucer::application *app)
     // always practical, so the page reports boot progress and uncaught errors
     // into the same trace file the shell uses.
     view->expose("shell_log", [](std::string msg) { trace("[page] " + msg); });
+
+    // ─── Native UI: the last five channels ───
+    //
+    // Modal dialogs need an owner HWND and screen capture needs the desktop DC,
+    // so these cannot live in the sidecar. The shim routes the matching clui
+    // methods here; the sidecar still turns the resulting paths into the
+    // attachment objects the renderer expects.
+    {
+        const auto hwnd = window->native().hwnd;
+
+        view->expose("pick_folder", [hwnd] { return shell::ui::pick_folder(hwnd); });
+        view->expose("pick_files", [hwnd] { return shell::ui::pick_files(hwnd); });
+
+        view->expose("save_theme_file", [hwnd](std::string suggested) {
+            return shell::ui::save_file(hwnd, suggested, "OpenClaw theme (*.json)", "*.json");
+        });
+        view->expose("open_theme_file", [hwnd] {
+            return shell::ui::open_file(hwnd, "OpenClaw theme (*.json)", "*.json");
+        });
+
+        view->expose("capture_screen", [] {
+            const auto out = (fs::temp_directory_path() /
+                              ("clui-screenshot-" + std::to_string(GetTickCount64()) + ".png")).string();
+            const auto path = shell::ui::capture_screen(out);
+            trace(path.empty() ? "capture_screen failed" : "captured " + path);
+            return path;
+        });
+    }
 
     view->expose("bridge_send",
                  [](std::string line)

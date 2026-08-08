@@ -3544,6 +3544,49 @@ var handlers = {
   [IPC.OPEN_EXTERNAL]: ({ url }) => openWith("rundll32", ["url.dll,FileProtocolHandler", String(url)]),
   [IPC.OPEN_PATH]: ({ path: target }) => openWith("explorer", [String(target)]),
   [IPC.OPEN_IN_TERMINAL]: ({ projectPath }) => openWith(process2.env.ComSpec ?? "cmd.exe", ["/c", "start", "", "cmd", "/k", `cd /d "${String(projectPath)}"`]),
+  // ── Support for the native-UI channels ──
+  //
+  // C++ owns the dialogs and the capture; it hands back plain paths. Turning
+  // those into the attachment objects the renderer expects is file work, so it
+  // belongs here rather than in C++.
+  "clui:describe-files": async ({ paths }) => {
+    const out = [];
+    for (const path of (Array.isArray(paths) ? paths : []).map(String)) {
+      try {
+        const info = await stat(path);
+        const ext = (path.split(".").pop() ?? "").toLowerCase();
+        const image = ["png", "jpg", "jpeg", "gif", "webp", "bmp"].includes(ext);
+        const mimeType = image ? `image/${ext === "jpg" ? "jpeg" : ext}` : "application/octet-stream";
+        out.push({
+          id: randomUUID2(),
+          type: image ? "image" : "file",
+          name: path.split(/[\/]/).pop(),
+          path,
+          mimeType,
+          size: info.size,
+          // Only images need a preview, and only small ones are worth inlining.
+          dataUrl: image && info.size < 8 * 1024 * 1024 ? `data:${mimeType};base64,${(await readFileAsync(path)).toString("base64")}` : void 0
+        });
+      } catch {
+      }
+    }
+    return out;
+  },
+  "clui:write-text-file": async ({ path, content }) => {
+    try {
+      await writeFile2(String(path), String(content), "utf-8");
+      return { ok: true, path: String(path) };
+    } catch (err) {
+      return { ok: false, error: String(err?.message ?? err) };
+    }
+  },
+  "clui:read-text-file": async ({ path }) => {
+    try {
+      return { ok: true, content: await readFileAsync(String(path), "utf-8") };
+    } catch (err) {
+      return { ok: false, error: String(err?.message ?? err) };
+    }
+  },
   ping: () => "pong",
   /** Introspection so the UI can show exactly how much of the surface is live. */
   "sidecar:channels": () => {

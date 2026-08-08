@@ -255,6 +255,58 @@ ${events
     }
   };
 
+  // ─── Native UI ───
+  //
+  // Dialogs and screen capture need an owner HWND and the desktop DC, so C++
+  // owns them. It returns paths; the sidecar turns those into the objects the
+  // renderer expects. Overridden here rather than generated, because these are
+  // the only methods whose implementation is split across both processes.
+  var ex = function () { return (window.saucer && window.saucer.exposed) || {}; };
+
+  window.clui.selectDirectory = function () {
+    return Promise.resolve(ex().pick_folder ? ex().pick_folder() : '').then(function (p) {
+      return p || null;
+    });
+  };
+
+  window.clui.attachFiles = function () {
+    return Promise.resolve(ex().pick_files ? ex().pick_files() : []).then(function (paths) {
+      if (!paths || !paths.length) return [];
+      return invoke('clui:describe-files', { paths: paths });
+    });
+  };
+
+  window.clui.takeScreenshot = function () {
+    return Promise.resolve(ex().capture_screen ? ex().capture_screen() : '').then(function (path) {
+      if (!path) return null;
+      return invoke('clui:describe-files', { paths: [path] }).then(function (list) {
+        return (list && list[0]) || null;
+      });
+    });
+  };
+
+  window.clui.exportTheme = function (theme, suggestedName) {
+    return Promise.resolve(ex().save_theme_file ? ex().save_theme_file(String(suggestedName || 'theme.json')) : '')
+      .then(function (path) {
+        if (!path) return { ok: false, cancelled: true };
+        return invoke('clui:write-text-file', { path: path, content: JSON.stringify(theme, null, 2) });
+      });
+  };
+
+  window.clui.importTheme = function () {
+    return Promise.resolve(ex().open_theme_file ? ex().open_theme_file() : '').then(function (path) {
+      if (!path) return { ok: false, cancelled: true };
+      return invoke('clui:read-text-file', { path: path }).then(function (r) {
+        if (!r.ok) return r;
+        try {
+          return { ok: true, theme: JSON.parse(r.content) };
+        } catch (e) {
+          return { ok: false, error: 'not valid JSON: ' + e.message };
+        }
+      });
+    });
+  };
+
   // Diagnostics the shell reads back out.
   window.clui.__meta = { invokes: ${invokes.length}, sends: ${sends.length}, events: ${events.length} };
   shellLog('clui shim installed: ' + JSON.stringify(window.clui.__meta));

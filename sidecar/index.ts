@@ -349,6 +349,56 @@ const handlers: Record<string, (args: any) => unknown | Promise<unknown>> = {
   [IPC.OPEN_IN_TERMINAL]: ({ projectPath }: any) =>
     openWith(process.env.ComSpec ?? 'cmd.exe', ['/c', 'start', '', 'cmd', '/k', `cd /d "${String(projectPath)}"`]),
 
+  // ── Support for the native-UI channels ──
+  //
+  // C++ owns the dialogs and the capture; it hands back plain paths. Turning
+  // those into the attachment objects the renderer expects is file work, so it
+  // belongs here rather than in C++.
+  'clui:describe-files': async ({ paths }: any) => {
+    const out: unknown[] = []
+    for (const path of (Array.isArray(paths) ? paths : []).map(String)) {
+      try {
+        const info = await stat(path)
+        const ext = (path.split('.').pop() ?? '').toLowerCase()
+        const image = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp'].includes(ext)
+        const mimeType = image ? `image/${ext === 'jpg' ? 'jpeg' : ext}` : 'application/octet-stream'
+        out.push({
+          id: randomUUID(),
+          type: image ? 'image' : 'file',
+          name: path.split(/[\/]/).pop(),
+          path,
+          mimeType,
+          size: info.size,
+          // Only images need a preview, and only small ones are worth inlining.
+          dataUrl:
+            image && info.size < 8 * 1024 * 1024
+              ? `data:${mimeType};base64,${(await readFileAsync(path)).toString('base64')}`
+              : undefined,
+        })
+      } catch {
+        // unreadable path: skip rather than fail the whole batch
+      }
+    }
+    return out
+  },
+
+  'clui:write-text-file': async ({ path, content }: any) => {
+    try {
+      await writeFile(String(path), String(content), 'utf-8')
+      return { ok: true, path: String(path) }
+    } catch (err: any) {
+      return { ok: false, error: String(err?.message ?? err) }
+    }
+  },
+
+  'clui:read-text-file': async ({ path }: any) => {
+    try {
+      return { ok: true, content: await readFileAsync(String(path), 'utf-8') }
+    } catch (err: any) {
+      return { ok: false, error: String(err?.message ?? err) }
+    }
+  },
+
   ping: () => 'pong',
 
   /** Introspection so the UI can show exactly how much of the surface is live. */
