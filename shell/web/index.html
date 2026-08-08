@@ -1,80 +1,71 @@
 <meta charset="utf-8">
 <title>saucer launcher spike</title>
 <style>
-  /* The whole point of the spike: if the window is genuinely per-pixel
-     transparent, everything outside the bar shows the desktop through it.
-     If WebView2 cannot do alpha, this page renders on an opaque slab and
-     the spike has failed its first question. */
   html, body {
-    margin: 0;
-    height: 100%;
+    margin: 0; height: 100%;
     background: transparent;
     overflow: hidden;
     font-family: 'Segoe UI', system-ui, sans-serif;
     user-select: none;
   }
   body {
-    display: flex;
-    flex-direction: column;
-    justify-content: flex-end;
-    align-items: center;
-    padding-bottom: 24px;
-    box-sizing: border-box;
+    display: flex; flex-direction: column;
+    justify-content: flex-end; align-items: center;
+    padding-bottom: 24px; box-sizing: border-box;
   }
-  /* Mirrors the real launcher: 700px column, ~52px pill, bottom-anchored. */
-  .column { width: 700px; }
+  .column { width: 440px; }
   .bar {
-    height: 52px;
-    border-radius: 26px;
-    display: flex;
-    align-items: center;
-    padding: 0 18px;
-    gap: 12px;
+    height: 52px; border-radius: 26px;
+    display: flex; align-items: center; padding: 0 18px; gap: 12px;
     background: rgba(22, 26, 34, 0.86);
     border: 1px solid rgba(120, 140, 180, 0.28);
     box-shadow: 0 18px 48px rgba(0, 0, 0, 0.55);
     backdrop-filter: blur(18px);
-    color: #dfe6f2;
-    font-size: 14px;
+    color: #dfe6f2; font-size: 13px;
   }
-  .dot {
-    width: 10px; height: 10px; border-radius: 50%;
-    background: #58d1a0;
-    box-shadow: 0 0 10px #58d1a0;
-  }
-  .hint { margin-left: auto; font-size: 11px; opacity: 0.55; }
-  /* A hard-edged checker directly behind the bar. Anti-aliased edges over the
-     desktop prove real alpha compositing rather than a colour-keyed fake. */
+  .dot { width: 10px; height: 10px; border-radius: 50%; background: #58d1a0; box-shadow: 0 0 10px #58d1a0; }
   .probe {
-    width: 160px; height: 26px; margin: 0 auto 10px;
+    width: 160px; height: 26px; margin: 0 auto 10px; border-radius: 13px;
     background: repeating-linear-gradient(45deg,
       rgba(255,80,80,0.85) 0 8px, rgba(80,140,255,0.85) 8px 16px);
-    border-radius: 13px;
   }
+  #state { margin-left: auto; font-size: 11px; opacity: 0.75; }
 </style>
 
 <div class="column">
   <div class="probe"></div>
   <div class="bar">
     <span class="dot"></span>
-    <span id="msg">saucer spike — transparent, frameless, always-on-top</span>
-    <span class="hint" id="hint">click-through: move the pointer off the bar</span>
+    <span>saucer spike</span>
+    <span id="state">pointer: —</span>
   </div>
 </div>
 
 <script>
-  // Report pointer transitions so the click-through design can be exercised
-  // from C++ later: the bar is interactive, everything else must not be.
-  const bar = document.querySelector('.bar')
-  const hint = document.getElementById('hint')
-  let over = null
+  // Click-through test.
+  //
+  // The bar is interactive; everything else must let clicks reach whatever is
+  // underneath. That means toggling click-through as the pointer crosses the
+  // bar's edge — which only works if mousemove keeps arriving WHILE
+  // click-through is on. Electron guarantees that with {forward: true}.
+  // saucer has no such option, so this page is really asking one question:
+  // after we turn click-through on, does anything else ever reach us?
+  const state = document.getElementById('state')
+  const call = (name, ...args) => window.saucer?.exposed?.[name]?.(...args)
+
+  let clickThrough = null
+  let moves = 0
+
   addEventListener('mousemove', (e) => {
+    moves++
+    call('pointer', e.clientX, e.clientY)
+
     const onBar = !!e.target.closest('.bar')
-    if (onBar === over) return
-    over = onBar
-    hint.textContent = onBar ? 'pointer: ON bar (interactive)' : 'pointer: off bar (should pass through)'
-    if (window.saucer && window.saucer.exposed && window.saucer.exposed.set_click_through) {
-      window.saucer.exposed.set_click_through(!onBar)
-    }
+    state.textContent = `pointer: ${onBar ? 'ON bar' : 'off bar'} · moves ${moves}`
+
+    // Only toggle on a transition, to keep the IPC chatter down.
+    if (onBar === clickThrough) return
+    clickThrough = onBar
+    call('set_click_through', !onBar)
   })
 </script>

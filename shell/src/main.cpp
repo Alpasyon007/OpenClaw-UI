@@ -8,7 +8,7 @@
 #include <string>
 #include <filesystem>
 
-#include <saucer/webview.hpp>
+#include <saucer/smartview.hpp>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -45,12 +45,30 @@ coco::stray start(saucer::application *app)
     static constexpr auto transparent = saucer::color{.r = 0, .g = 0, .b = 0, .a = 0};
 
     auto window  = saucer::window::create(app).value();
-    auto webview = saucer::webview::create({.window = window});
+    auto webview = saucer::smartview::create({.window = window});
 
     if (!webview.has_value())
     {
-        co_return trace(std::string{"webview::create failed: "} + webview.error().message());
+        co_return trace(std::string{"smartview::create failed: "} + webview.error().message());
     }
+
+    // The decisive test. Electron's setIgnoreMouseEvents(ignore, {forward:true})
+    // keeps delivering mousemove while the window is click-through, which is
+    // what lets the page decide when to become interactive again. saucer has
+    // only the boolean. If the page stops receiving pointer events once this
+    // is enabled, it can never ask for them back and the launcher is inert.
+    webview->expose("set_click_through",
+                    [window](bool enabled)
+                    {
+                        window->set_click_through(enabled);
+                        trace(std::string{"set_click_through("} + (enabled ? "true" : "false") + ")");
+                    });
+
+    // Called from JS on every mousemove. Whether these keep arriving after
+    // click-through is enabled is the entire question.
+    webview->expose("pointer", [](int x, int y) {
+        trace("pointer " + std::to_string(x) + "," + std::to_string(y));
+    });
 
     window->set_title("saucer minimal");
     window->set_size({.w = 480, .h = 320});
