@@ -295,6 +295,58 @@ coco::stray start(saucer::application *app)
     }
 #endif
 
+#ifdef _WIN32
+    // ─── Global shortcuts ───
+    //
+    // Electron provided these via globalShortcut.register; saucer has no
+    // equivalent, so register them with Win32 directly. RegisterHotKey delivers
+    // WM_HOTKEY to the registering thread, so this owns a small message loop of
+    // its own rather than trying to hook saucer's.
+    //
+    // Accelerators match src/shared/shortcuts.ts: Alt+Space and Ctrl+Shift+K
+    // both toggle the launcher.
+    std::thread{[app, window]
+                {
+                    constexpr int kAltSpace = 1;
+                    constexpr int kCtrlShiftK = 2;
+
+                    const bool alt_space = RegisterHotKey(nullptr, kAltSpace, MOD_ALT | MOD_NOREPEAT, VK_SPACE);
+                    const bool ctrl_k = RegisterHotKey(nullptr, kCtrlShiftK,
+                                                       MOD_CONTROL | MOD_SHIFT | MOD_NOREPEAT, 0x4B);
+                    trace(std::string{"hotkeys: Alt+Space="} + (alt_space ? "ok" : "FAILED") +
+                          " Ctrl+Shift+K=" + (ctrl_k ? "ok" : "FAILED"));
+
+                    MSG msg{};
+                    while (running.load(std::memory_order_relaxed) && GetMessageW(&msg, nullptr, 0, 0))
+                    {
+                        if (msg.message != WM_HOTKEY)
+                        {
+                            continue;
+                        }
+
+                        // Toggle. Window calls must run on the UI thread.
+                        app->post([window]
+                                  {
+                                      const auto visible = window->visible();
+                                      trace(std::string{"hotkey toggle; visible="} + (visible ? "1" : "0"));
+                                      if (visible)
+                                      {
+                                          window->hide();
+                                      }
+                                      else
+                                      {
+                                          window->show();
+                                          window->focus();
+                                      }
+                                  });
+                    }
+
+                    UnregisterHotKey(nullptr, kAltSpace);
+                    UnregisterHotKey(nullptr, kCtrlShiftK);
+                }}
+        .detach();
+#endif
+
     trace("shown; polling cursor for hit-testing");
     co_await app->finish();
     running.store(false, std::memory_order_relaxed);

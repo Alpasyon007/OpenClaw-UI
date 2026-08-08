@@ -215,6 +215,54 @@
     }); },
   };
 
+  // ─── Click-through hit regions ───
+  //
+  // saucer has no equivalent of Electron's setIgnoreMouseEvents(forward:true),
+  // so the shell polls the cursor and toggles click-through against rectangles
+  // the page publishes. The renderer already marks every interactive element
+  // with data-clui-ui — the same attribute its Electron mousemove handler
+  // hit-tested — so the rects come straight from existing markup and the
+  // renderer needs no changes.
+  //
+  // Without this the rect list stays empty, every point reads as "not over",
+  // and click-through is stuck on: the window is visible but inert.
+  function publishHitRects() {
+    if (!(window.saucer && window.saucer.exposed && window.saucer.exposed.set_hit_rects)) return;
+    var flat = [];
+    var els = document.querySelectorAll('[data-clui-ui]');
+    for (var i = 0; i < els.length; i++) {
+      var r = els[i].getBoundingClientRect();
+      if (r.width < 1 || r.height < 1) continue;
+      flat.push(Math.round(r.x), Math.round(r.y), Math.round(r.width), Math.round(r.height));
+    }
+    window.saucer.exposed.set_hit_rects(flat);
+  }
+
+  // Coalesce to one publish per frame: the UI animates, and a MutationObserver
+  // on a React tree fires constantly.
+  var rectsQueued = false;
+  function scheduleHitRects() {
+    if (rectsQueued) return;
+    rectsQueued = true;
+    requestAnimationFrame(function () { rectsQueued = false; publishHitRects(); });
+  }
+
+  window.addEventListener('DOMContentLoaded', function () {
+    scheduleHitRects();
+    new MutationObserver(scheduleHitRects).observe(document.documentElement, {
+      subtree: true, childList: true, attributes: true,
+      attributeFilter: ['style', 'class', 'data-clui-ui'],
+    });
+    window.addEventListener('resize', scheduleHitRects);
+    // Animations move things without mutating the DOM, so sample for a while.
+    setInterval(scheduleHitRects, 250);
+  });
+
+  // The renderer drives click-through itself under Electron. That is a window
+  // concern, not a backend one, so intercept it here rather than forwarding it
+  // to the sidecar where it would be silently dropped.
+  window.clui.setIgnoreMouseEvents = function () { /* shell owns this now */ };
+
   // Diagnostics the shell reads back out.
   window.clui.__meta = { invokes: 46, sends: 12, events: 9 };
   shellLog('clui shim installed: ' + JSON.stringify(window.clui.__meta));
