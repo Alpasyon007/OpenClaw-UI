@@ -166,7 +166,7 @@ function redactSecrets(text: string): string {
 function readWindowsUserEnv(name: string): string | null {
   if (process.platform !== 'win32') return null
   try {
-    const out = execFileSync('reg', ['query', 'HKCU\Environment', '/v', name], {
+    const out = execFileSync('reg', ['query', 'HKCU\\Environment', '/v', name], {
       encoding: 'utf-8',
       stdio: ['ignore', 'pipe', 'ignore'],
     })
@@ -215,6 +215,89 @@ function runCliAsync(args: string[], timeoutMs = 20000, extraEnv: NodeJS.Process
         resolve({ ok: !err, stdout: String(stdout || '').trim(), stderr: String(stderr || err?.message || '').trim() }),
     )
   })
+}
+
+
+/** True when the CLI is configured to route runs at a remote gateway. */
+function isRemoteGatewayMode(): boolean {
+  return readOpenclawConfig().gateway?.mode === 'remote'
+}
+
+/** Call a gateway RPC method and parse its JSON reply. Null on any failure. */
+async function gatewayCallJson(method: string, params: unknown = {}, timeoutMs = 25000): Promise<any | null> {
+  const token = resolveGatewayToken()
+  if (!token) {
+    log(`gateway call ${method} skipped — no credential resolvable in this process`)
+    return null
+  }
+  const res = await runCliAsync(
+    ['gateway', 'call', method, '--params', JSON.stringify(params), '--json'],
+    timeoutMs,
+    { OPENCLAW_GATEWAY_TOKEN: token },
+  )
+  if (!res.stdout) {
+    log(`gateway call ${method} produced no output: ${res.stderr.slice(0, 200)}`)
+    return null
+  }
+  try {
+    const parsed = JSON.parse(res.stdout)
+    if (parsed && parsed.ok === false) {
+      log(`gateway call ${method} rejected: ${parsed.error?.message || 'unknown error'}`)
+      return null
+    }
+    return parsed
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Model list from the gateway.
+ *
+ * In remote mode the agent runs on the gateway, so its list is the one that
+ * matters — local config generally has no models section at all. Reading local
+ * config here is why the picker came up empty.
+ */
+async function fetchGatewayModelInfo() {
+  const [modelsRes, agentsRes] = await Promise.all([
+    gatewayCallJson('models.list'),
+    gatewayCallJson('agents.list'),
+  ])
+  if (!modelsRes?.models) return null
+
+  const byProvider = new Map<string, Array<{ id: string; name: string }>>()
+  for (const m of modelsRes.models as Array<Record<string, any>>) {
+    if (m.available !== true) continue
+    const provider = String(m.provider || '').trim()
+    const id = String(m.id || '').trim()
+    if (!provider || !id) continue
+    if (!byProvider.has(provider)) byProvider.set(provider, [])
+    byProvider.get(provider)!.push({ id, name: String(m.name || id) })
+  }
+
+  // Current selection comes from the default agent's primary model.
+  let provider: string | null = null
+  let model: string | null = null
+  const defaultId = agentsRes?.defaultId || 'main'
+  const agent = (agentsRes?.agents || []).find((a: any) => a?.id === defaultId) || agentsRes?.agents?.[0]
+  const primary = String(agent?.model?.primary || '')
+  if (primary.includes('/')) {
+    const idx = primary.indexOf('/')
+    provider = primary.slice(0, idx) || null
+    model = primary.slice(idx + 1) || null
+    // A wildcard is a valid key in the per-model settings map but not a
+    // concrete model id — treat it as nothing selected.
+    if (model === '*' || model === '') model = null
+  }
+
+  return {
+    ok: true,
+    provider,
+    model,
+    providers: Array.from(byProvider.entries())
+      .map(([id, models]) => ({ id, models: models.sort((a, b) => a.id.localeCompare(b.id)) }))
+      .sort((a, b) => a.id.localeCompare(b.id)),
+  }
 }
 
 /** Launch something through the OS, replacing Electron's shell module. */
@@ -380,14 +463,46 @@ const handlers: Record<string, (args: any) => unknown | Promise<unknown>> = {
 
   // ── CLI-backed channels ──
   [IPC.OPENCLAW_HEALTH]: () => runCli(['doctor'], 20000),
-  [IPC.OPENCLAW_MODEL_INFO]: () => {
-    const r = runCli(['config', 'get', 'models'], 15000)
-    try {
-      return { ok: r.ok, models: JSON.parse(r.stdout) }
-    } catch {
-      return { ok: false, models: null, raw: r.stdout }
+  [IPC.OPENCLAW_MODEL_INFO]: async () => {
+    if (isRemoteGatewayMode()) {
+      const remote = await fetchGatewayModelInfo()
+      if (remote) return remote
+
+      log('gateway model info unavailable — falling back to local config')
+      if (!resolveGatewayToken()) {
+        const id = readOpenclawConfig().gateway?.remote?.token?.id || 'OPENCLAW_REMOTE_TOKEN'
+        return {
+          ok: false,
+          provider: null,
+          model: null,
+          providers: [],
+          error: `Gateway credential not readable by this app. Set ${id} for your user account, then restart OpenClaw UI.`,
+        }
+      }
     }
+
+    // Local mode, or remote with a resolvable credential but no gateway answer.
+    const config: any = readOpenclawConfig()
+    const providersMap = config.models?.providers || {}
+    const providers = Object.entries(providersMap).map(([id, info]: [string, any]) => ({
+      id,
+      models: (info.models || [])
+        .map((m: any) => ({ id: String(m.id || '').trim(), name: String(m.name || m.id || '').trim() }))
+        .filter((m: any) => m.id),
+    }))
+
+    const primary = config.agents?.defaults?.model?.primary || ''
+    let provider: string | null = null
+    let model: string | null = null
+    if (primary.includes('/')) {
+      const idx = primary.indexOf('/')
+      provider = primary.slice(0, idx) || null
+      model = primary.slice(idx + 1) || null
+      if (model === '*' || model === '') model = null
+    }
+    return { ok: true, provider, model, providers }
   },
+
   [IPC.OPENCLAW_SET_MODEL]: ({ model }: any) => runCli(['config', 'set', 'model', String(model)], 15000),
   [IPC.OPENCLAW_ONBOARD]: () => runCli(['onboard'], 60000),
   [IPC.OPENCLAW_RUN]: ({ args }: any) => runCli(Array.isArray(args) ? args.map(String) : [], 60000),
