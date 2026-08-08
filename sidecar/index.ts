@@ -155,6 +155,68 @@ function redactSecrets(text: string): string {
     .replace(/\b[a-f0-9]{64}\b/gi, '<redacted>')
 }
 
+
+/**
+ * Read a variable from the persistent Windows user environment.
+ *
+ * A token set with setx after this process started is not in process.env, so
+ * the registry is the only place to find it. This is why the probe could not
+ * authenticate: the credential existed but was invisible to us.
+ */
+function readWindowsUserEnv(name: string): string | null {
+  if (process.platform !== 'win32') return null
+  try {
+    const out = execFileSync('reg', ['query', 'HKCU\Environment', '/v', name], {
+      encoding: 'utf-8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    })
+    return out.match(/REG_(?:EXPAND_)?SZ\s+(.+)/)?.[1]?.trim() || null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Resolve the gateway credential, matching src/main/index.ts:1921.
+ * Checks the configured id first, then the conventional names, in our own
+ * environment and then the persistent one.
+ */
+function resolveGatewayToken(): string | null {
+  const configuredId = readOpenclawConfig().gateway?.remote?.token?.id || null
+  const names = [configuredId, 'OPENCLAW_GATEWAY_TOKEN', 'OPENCLAW_REMOTE_TOKEN'].filter(Boolean) as string[]
+
+  for (const name of names) {
+    if (process.env[name]) return process.env[name] as string
+  }
+  for (const name of names) {
+    const fromRegistry = readWindowsUserEnv(name)
+    if (fromRegistry) {
+      log(`resolved gateway credential from the persistent user environment (${name})`)
+      return fromRegistry
+    }
+  }
+  return null
+}
+
+/** Async CLI call. The sync variant would block the whole sidecar for 45s. */
+function runCliAsync(args: string[], timeoutMs = 20000, extraEnv: NodeJS.ProcessEnv = {}) {
+  const { command, args: full } = cliInvocation(args)
+  return new Promise<{ ok: boolean; stdout: string; stderr: string }>((resolve) => {
+    execFile(
+      command,
+      full,
+      {
+        encoding: 'utf-8',
+        timeout: timeoutMs,
+        env: getCliEnv({ ...getCliRuntime().extraEnv, ...extraEnv }),
+        maxBuffer: 8 * 1024 * 1024,
+      },
+      (err: any, stdout: string, stderr: string) =>
+        resolve({ ok: !err, stdout: String(stdout || '').trim(), stderr: String(stderr || err?.message || '').trim() }),
+    )
+  })
+}
+
 /** Launch something through the OS, replacing Electron's shell module. */
 function openWith(command: string, args: string[]) {
   return new Promise<{ ok: boolean; error?: string }>((resolve) => {
@@ -355,8 +417,33 @@ const handlers: Record<string, (args: any) => unknown | Promise<unknown>> = {
     }
   },
   [IPC.NODE_ACTION]: ({ action }: any) => runCli(['node', String(action)], 30000),
-  [IPC.GATEWAY_STATUS]: () => runCli(['gateway', 'status'], 20000),
-  [IPC.GATEWAY_PROBE]: () => runCli(['gateway', 'probe'], 20000),
+  [IPC.GATEWAY_STATUS]: async () => {
+    const token = resolveGatewayToken()
+    const res = await runCliAsync(['gateway', 'status'], 30000, token ? { OPENCLAW_GATEWAY_TOKEN: token } : {})
+    const text = `${res.stdout}\n${res.stderr}`.trim()
+    return {
+      ok: res.ok,
+      running: /Runtime:\s*running/i.test(text),
+      installed: !/Service unit not found|Service not installed/i.test(text),
+      output: redactSecrets(text),
+    }
+  },
+  // The probe must carry the credential or the gateway answers unreachable —
+  // which is exactly what the Control Center was reporting.
+  [IPC.GATEWAY_PROBE]: async () => {
+    const token = resolveGatewayToken()
+    const res = await runCliAsync(['gateway', 'probe'], 45000, token ? { OPENCLAW_GATEWAY_TOKEN: token } : {})
+    const text = `${res.stdout}\n${res.stderr}`.trim()
+    return {
+      ok: res.ok,
+      reachable: /Reachable:\s*yes/i.test(text),
+      capability: text.match(/Capability:\s*([^\n·]+)/i)?.[1]?.trim() || null,
+      // The gateway rejects operator calls until the credential carries
+      // operator scope; surface that rather than a generic failure.
+      missingOperatorScope: /missing scope:\s*operator/i.test(text),
+      output: redactSecrets(text),
+    }
+  },
   // Returns GatewayConfigView (src/shared/types.ts:269). Field names matter:
   // the panel reads remoteUrl/tokenRef/tokenResolvable, and my earlier ad-hoc
   // shape left the URL and Token rows blank while mode rendered fine.
