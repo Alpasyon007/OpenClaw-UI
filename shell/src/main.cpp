@@ -128,10 +128,27 @@ coco::stray start(saucer::application *app)
         if (GetMonitorInfoW(primary, &mi))
         {
             const auto work = mi.rcWork;
+
+            // set_size sets the CLIENT area, but positioning moves the WINDOW
+            // rect — and those differ here by 16x39 even with decoration::none.
+            // Using the client height put the window's bottom 39px below the
+            // work area, which is what dropped the bar too low on screen.
+            // Measure the frame rather than assume it is zero.
+            RECT wr{};
+            auto outer_w = kWinWidth;
+            auto outer_h = kWinHeight;
+            if (GetWindowRect(window->native().hwnd, &wr))
+            {
+                outer_w = wr.right - wr.left;
+                outer_h = wr.bottom - wr.top;
+            }
+
             window->set_position({
-                .x = work.left + ((work.right - work.left) - kWinWidth) / 2,
-                .y = work.bottom - kWinHeight - kBottomMargin,
+                .x = work.left + ((work.right - work.left) - outer_w) / 2,
+                .y = work.bottom - outer_h - kBottomMargin,
             });
+            trace("frame delta " + std::to_string(outer_w - kWinWidth) + "x" +
+                  std::to_string(outer_h - kWinHeight));
             trace("primary work area " + std::to_string(work.left) + "," + std::to_string(work.top) +
                   " " + std::to_string(work.right - work.left) + "x" +
                   std::to_string(work.bottom - work.top));
