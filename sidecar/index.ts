@@ -23,6 +23,7 @@ import process from 'node:process'
 import { randomUUID } from 'node:crypto'
 
 import { IPC } from '../src/shared/types'
+import type { GatewayConfigView, NodeHostStatus } from '../src/shared/types'
 import { getShortcuts } from '../src/shared/shortcuts'
 import { ControlPlane } from '../src/main/claude/control-plane'
 import { getCliRuntime, getAgentDataHomes, cliInvocation } from '../src/main/openclaw/runtime'
@@ -137,6 +138,21 @@ function readOpenclawConfig(): OpenclawConfig {
   } catch {
     return {}
   }
+}
+
+/**
+ * Strip credential-shaped values out of CLI output before it crosses IPC.
+ * `openclaw node status` echoes the service environment block, which includes
+ * the gateway token in plaintext, and the renderer pipes raw into a <pre>.
+ */
+function redactSecrets(text: string): string {
+  if (!text) return text
+  return text
+    .replace(
+      /((?:TOKEN|SECRET|PASSWORD|APIKEY|API_KEY|PRIVATE_KEY|CREDENTIAL)[A-Z0-9_]*\s*[=:]\s*"?)([^\s"',}]+)/gi,
+      '$1<redacted>',
+    )
+    .replace(/\b[a-f0-9]{64}\b/gi, '<redacted>')
 }
 
 /** Launch something through the OS, replacing Electron's shell module. */
@@ -313,26 +329,51 @@ const handlers: Record<string, (args: any) => unknown | Promise<unknown>> = {
   [IPC.OPENCLAW_SET_MODEL]: ({ model }: any) => runCli(['config', 'set', 'model', String(model)], 15000),
   [IPC.OPENCLAW_ONBOARD]: () => runCli(['onboard'], 60000),
   [IPC.OPENCLAW_RUN]: ({ args }: any) => runCli(Array.isArray(args) ? args.map(String) : [], 60000),
-  [IPC.NODE_STATUS]: () => runCli(['node', 'status'], 20000),
+  // Returns NodeHostStatus (src/shared/types.ts:250) by parsing the CLI's
+  // human-readable output. Returning raw stdout left the panel showing
+  // "Not installed" while the node was registered and running.
+  [IPC.NODE_STATUS]: (): NodeHostStatus => {
+    const r = runCli(['node', 'status'], 20000)
+    const text = r.stdout
+
+    const grab = (re: RegExp) => text.match(re)?.[1]?.trim() ?? null
+    const command = grab(/^Command:\s*(.+)$/m) ?? ''
+    const runtime = grab(/^Runtime:\s*(.+)$/m) ?? ''
+
+    return {
+      installed: /registered/i.test(grab(/^Service:\s*(.+)$/m) ?? ''),
+      running: /\brunning\b/i.test(runtime),
+      pid: Number(runtime.match(/pid\s+(\d+)/i)?.[1]) || null,
+      displayName: grab(/^Name:\s*(.+)$/m),
+      nodeId: grab(/^Node ID:\s*(.+)$/m),
+      gatewayHost: command.match(/--host\s+(\S+)/)?.[1] ?? null,
+      gatewayPort: Number(command.match(/--port\s+(\d+)/)?.[1]) || null,
+      tls: /--tls\b/.test(command),
+      serviceKind: grab(/^Service:\s*(.+)$/m),
+      // The type requires credentials stripped before this crosses IPC.
+      raw: redactSecrets(text),
+    }
+  },
   [IPC.NODE_ACTION]: ({ action }: any) => runCli(['node', String(action)], 30000),
   [IPC.GATEWAY_STATUS]: () => runCli(['gateway', 'status'], 20000),
   [IPC.GATEWAY_PROBE]: () => runCli(['gateway', 'probe'], 20000),
-  [IPC.GATEWAY_CONFIG_GET]: () => {
-    // Report whether the credential actually resolves, not just whether the
-    // config names one: a config that references a missing env var looks
-    // configured but cannot connect.
+  // Returns GatewayConfigView (src/shared/types.ts:269). Field names matter:
+  // the panel reads remoteUrl/tokenRef/tokenResolvable, and my earlier ad-hoc
+  // shape left the URL and Token rows blank while mode rendered fine.
+  [IPC.GATEWAY_CONFIG_GET]: (): GatewayConfigView => {
     const config = readOpenclawConfig()
-    const tokenEnvVar = config.gateway?.remote?.token?.id || 'OPENCLAW_REMOTE_TOKEN'
+    const ref = config.gateway?.remote?.token
+    const envId = ref?.id || 'OPENCLAW_REMOTE_TOKEN'
     return {
-      ok: true,
-      mode: config.gateway?.mode ?? 'local',
-      url: config.gateway?.remote?.url ?? null,
-      bind: config.gateway?.bind ?? null,
-      tokenEnvVar,
-      tokenResolved: !!process.env[tokenEnvVar],
-      config,
+      mode: (config.gateway?.mode as 'local' | 'remote') ?? null,
+      remoteUrl: config.gateway?.remote?.url ?? null,
+      // Descriptor only — the token value never crosses IPC.
+      tokenRef: ref ? { source: ref.source ?? 'env', id: envId } : null,
+      tokenResolvable: !!process.env[envId],
+      configPath: join(homedir(), '.openclaw', 'openclaw.json'),
     }
   },
+
   [IPC.TRANSCRIBE_AUDIO]: ({ audioBase64 }: any) => {
     // The CLI reads the clip from a file; a base64 blob on argv would blow the
     // command-line length limit.
