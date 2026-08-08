@@ -73,6 +73,9 @@ add_custom_command(
   COMMAND ${CMAKE_COMMAND} -E copy_directory
           "${CMAKE_CURRENT_SOURCE_DIR}/sidecar"
           "$<TARGET_FILE_DIR:${PROJECT_NAME}>/sidecar"
+  COMMAND ${CMAKE_COMMAND} -E copy_directory
+          "${CMAKE_CURRENT_SOURCE_DIR}/../resources"
+          "$<TARGET_FILE_DIR:${PROJECT_NAME}>/resources"
 )
 
 # node-pty is a native module and stays external to the sidecar bundle, so it

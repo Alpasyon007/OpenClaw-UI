@@ -440,7 +440,9 @@ coco::stray start(saucer::application *app)
                 {
                     static std::function<void()> do_summon = summon;
                     static std::function<void()> do_dismiss = dismiss;
-                    static bool on_screen_hint = true;
+                    // Read the shell's real state rather than tracking a guess:
+                    // toggling via hotkey and tray alternately would otherwise
+                    // desynchronise them and a click would appear to do nothing.
 
                     constexpr UINT kTrayMsg = WM_APP + 1;
                     constexpr int kAltSpace = 1;
@@ -456,8 +458,7 @@ coco::stray start(saucer::application *app)
                             // matching the Electron tray's behaviour.
                             if (LOWORD(lp) == WM_LBUTTONUP)
                             {
-                                on_screen_hint ? do_dismiss() : do_summon();
-                                on_screen_hint = !on_screen_hint;
+                                launcher_on_screen.load() ? do_dismiss() : do_summon();
                             }
                             else if (LOWORD(lp) == WM_RBUTTONUP)
                             {
@@ -481,7 +482,6 @@ coco::stray start(saucer::application *app)
                             if (LOWORD(wp) == 100)
                             {
                                 do_summon();
-                                on_screen_hint = true;
                             }
                             else if (LOWORD(wp) == 101)
                             {
@@ -493,8 +493,7 @@ coco::stray start(saucer::application *app)
 
                         if (msg == WM_HOTKEY)
                         {
-                            on_screen_hint ? do_dismiss() : do_summon();
-                            on_screen_hint = !on_screen_hint;
+                            launcher_on_screen.load() ? do_dismiss() : do_summon();
                             return 0;
                         }
 
@@ -519,7 +518,13 @@ coco::stray start(saucer::application *app)
                     nid.uID              = 1;
                     nid.uFlags           = NIF_ICON | NIF_MESSAGE | NIF_TIP;
                     nid.uCallbackMessage = kTrayMsg;
-                    nid.hIcon            = LoadIconW(nullptr, IDI_APPLICATION);
+                    // The real app icon, falling back to the generic one only
+                    // if the PNG is missing or fails to decode.
+                    const auto icon_path = (exe_dir() / "resources" / "icon.png").string();
+                    auto *app_icon = shell::ui::load_icon(icon_path, GetSystemMetrics(SM_CXSMICON));
+                    nid.hIcon = app_icon ? app_icon : LoadIconW(nullptr, IDI_APPLICATION);
+                    trace(app_icon ? "tray icon loaded from " + icon_path
+                                   : "tray icon FALLBACK (could not load " + icon_path + ")");
                     lstrcpynW(nid.szTip, L"OpenClaw UI", 128);
                     const auto tray_ok = Shell_NotifyIconW(NIM_ADD, &nid);
 

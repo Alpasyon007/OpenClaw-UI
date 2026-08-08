@@ -155,6 +155,44 @@ namespace shell::ui
         return detail::narrow(name.c_str());
     }
 
+    /// Load a PNG as an HICON, scaled to `size`. Returns nullptr on failure.
+    ///
+    /// LoadImage cannot read PNG, so this goes through GDI+ — already linked for
+    /// the screen capture below. The source art is 1024x1024, so it is drawn
+    /// into a small bitmap with high-quality interpolation rather than handed to
+    /// GetHICON directly, which would produce a badly aliased tray icon.
+    ///
+    /// The returned HICON is a plain GDI object and outlives GdiplusShutdown.
+    inline HICON load_icon(const std::string &path, int size)
+    {
+        using namespace Gdiplus;
+
+        GdiplusStartupInput gdip_in{};
+        ULONG_PTR token{};
+        if (GdiplusStartup(&token, &gdip_in, nullptr) != Ok) return nullptr;
+
+        struct Guard
+        {
+            ULONG_PTR token;
+            ~Guard() { GdiplusShutdown(token); }
+        } guard{token};
+
+        Bitmap source{detail::widen(path).c_str()};
+        if (source.GetLastStatus() != Ok) return nullptr;
+
+        Bitmap scaled{size, size, PixelFormat32bppARGB};
+        {
+            Graphics g{&scaled};
+            g.SetInterpolationMode(InterpolationModeHighQualityBicubic);
+            g.SetPixelOffsetMode(PixelOffsetModeHighQuality);
+            g.Clear(Color{0, 0, 0, 0});
+            g.DrawImage(&source, 0, 0, size, size);
+        }
+
+        HICON icon{};
+        return scaled.GetHICON(&icon) == Ok ? icon : nullptr;
+    }
+
     /// Capture the whole virtual desktop to a PNG. Returns the path, or "".
     ///
     /// Under Electron this channel shelled out to /usr/sbin/screencapture, so it
@@ -216,6 +254,7 @@ namespace shell::ui
     inline std::string save_file(void *, const std::string &, const std::string &, const std::string &) { return {}; }
     inline std::string open_file(void *, const std::string &, const std::string &) { return {}; }
     inline std::string capture_screen(const std::string &) { return {}; }
+    inline void *load_icon(const std::string &, int) { return nullptr; }
 
 #endif
 } // namespace shell::ui
