@@ -263,6 +263,20 @@
   // to the sidecar where it would be silently dropped.
   window.clui.setIgnoreMouseEvents = function () { /* shell owns this now */ };
 
+  // Window-lifecycle acks belong to the shell, not the sidecar. Left on the
+  // default path they would be forwarded to Node and dropped, and the summon
+  // handshake would fall back to its timeout every time.
+  window.clui.windowReady = function (generation) {
+    if (window.saucer && window.saucer.exposed && window.saucer.exposed.window_ready) {
+      window.saucer.exposed.window_ready(generation | 0);
+    }
+  };
+  window.clui.dismissReady = function (generation) {
+    if (window.saucer && window.saucer.exposed && window.saucer.exposed.dismiss_ready) {
+      window.saucer.exposed.dismiss_ready(generation | 0);
+    }
+  };
+
   // Diagnostics the shell reads back out.
   window.clui.__meta = { invokes: 46, sends: 12, events: 9 };
   shellLog('clui shim installed: ' + JSON.stringify(window.clui.__meta));

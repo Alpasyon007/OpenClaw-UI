@@ -296,6 +296,92 @@ coco::stray start(saucer::application *app)
 #endif
 
 #ifdef _WIN32
+    // ─── Summon / dismiss ───
+    //
+    // Mirrors the Electron launcher's handshake, which exists for a measured
+    // reason: revealing the window before the renderer has settled makes the bar
+    // visibly assemble itself. So the page is told to prepare while off screen,
+    // it acks once its layout has stopped moving, and only then does the window
+    // move into view. Dismissal is the same in reverse — the exit animation
+    // finishes before the window is parked.
+    //
+    // Parking off-screen rather than hide()/show() for the same reason it was
+    // needed under Electron: hide() tears the renderer down far enough that the
+    // reveal lands mid-layout.
+    static std::atomic_int present_gen{0};
+    static std::atomic_int dismiss_gen{0};
+    static std::atomic_bool launcher_on_screen{true};
+    static saucer::position on_screen_pos{};
+    static int park_x = 0;
+
+    {
+        const auto pos = window->position();
+        on_screen_pos = pos;
+        // Just past the leftmost monitor: off every screen, but an ordinary
+        // coordinate. Far-left extremes like -32000 sit near the 16-bit floor
+        // that legacy WM_MOVE packs into and drew a corrupt titlebar.
+        park_x = GetSystemMetrics(SM_XVIRTUALSCREEN) - kWinWidth - 100;
+    }
+
+    auto *evp = &view.value();
+    const auto send_event = [app, evp](std::string channel, std::string payload_json)
+    {
+        app->post([evp, channel = std::move(channel), payload_json = std::move(payload_json)]
+                  {
+                      const auto json = "{\"event\":\"" + channel + "\",\"payload\":" + payload_json + "}";
+                      evp->execute("window.__bridgeReceive({})", json);
+                  });
+    };
+
+    const auto reveal = [app, window, send_event](int gen)
+    {
+        // Consume the generation so the ack and the watchdog cannot both fire.
+        int expected = gen;
+        if (!present_gen.compare_exchange_strong(expected, 0)) return;
+        if (launcher_on_screen.exchange(true)) return;
+        app->post([window] { window->set_position(on_screen_pos); window->focus(); });
+        send_event("clui:window-shown", "null");
+        trace("reveal gen=" + std::to_string(gen));
+    };
+
+    const auto park = [app, window](int gen)
+    {
+        int expected = gen;
+        if (!dismiss_gen.compare_exchange_strong(expected, 0)) return;
+        if (launcher_on_screen.load()) return;
+        app->post([window] { window->set_position({.x = park_x, .y = on_screen_pos.y}); });
+        trace("parked gen=" + std::to_string(gen));
+    };
+
+    // Acks from the page. clui.windowReady/dismissReady are routed here by the
+    // shim rather than to the sidecar, since they are window concerns.
+    view->expose("window_ready", [reveal](int gen) { reveal(gen); });
+    view->expose("dismiss_ready", [park](int gen) { park(gen); });
+
+    const auto summon = [send_event, reveal]
+    {
+        if (launcher_on_screen.load()) return;
+        const auto gen = ++present_gen;
+        send_event("clui:window-prepare", std::to_string(gen));
+        // A wedged renderer must never make the launcher unsummonable.
+        std::thread{[gen, reveal] {
+            std::this_thread::sleep_for(std::chrono::milliseconds(450));
+            reveal(gen);
+        }}.detach();
+    };
+
+    const auto dismiss = [send_event, park]
+    {
+        if (!launcher_on_screen.load()) return;
+        launcher_on_screen.store(false);
+        const auto gen = ++dismiss_gen;
+        send_event("clui:window-dismiss", std::to_string(gen));
+        std::thread{[gen, park] {
+            std::this_thread::sleep_for(std::chrono::milliseconds(260));
+            park(gen);
+        }}.detach();
+    };
+
     // ─── Global shortcuts ───
     //
     // Electron provided these via globalShortcut.register; saucer has no
@@ -305,7 +391,7 @@ coco::stray start(saucer::application *app)
     //
     // Accelerators match src/shared/shortcuts.ts: Alt+Space and Ctrl+Shift+K
     // both toggle the launcher.
-    std::thread{[app, window]
+    std::thread{[app, window, summon, dismiss]
                 {
                     constexpr int kAltSpace = 1;
                     constexpr int kCtrlShiftK = 2;
@@ -324,21 +410,16 @@ coco::stray start(saucer::application *app)
                             continue;
                         }
 
-                        // Toggle. Window calls must run on the UI thread.
-                        app->post([window]
-                                  {
-                                      const auto visible = window->visible();
-                                      trace(std::string{"hotkey toggle; visible="} + (visible ? "1" : "0"));
-                                      if (visible)
-                                      {
-                                          window->hide();
-                                      }
-                                      else
-                                      {
-                                          window->show();
-                                          window->focus();
-                                      }
-                                  });
+                        trace(std::string{"hotkey toggle; on_screen="} +
+                              (launcher_on_screen.load() ? "1" : "0"));
+                        if (launcher_on_screen.load())
+                        {
+                            dismiss();
+                        }
+                        else
+                        {
+                            summon();
+                        }
                     }
 
                     UnregisterHotKey(nullptr, kAltSpace);
