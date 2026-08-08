@@ -138,6 +138,11 @@ coco::stray start(saucer::application *app)
 
     // Page -> sidecar. Fire-and-forget; replies come back asynchronously below,
     // which is also how a request/response API is built on a one-way pair.
+    // Page diagnostics. The GUI subsystem has no console and DevTools is not
+    // always practical, so the page reports boot progress and uncaught errors
+    // into the same trace file the shell uses.
+    view->expose("shell_log", [](std::string msg) { trace("[page] " + msg); });
+
     view->expose("bridge_send",
                  [](std::string line)
                  {
@@ -151,13 +156,31 @@ coco::stray start(saucer::application *app)
         const auto script = (exe_dir() / "sidecar" / "main.mjs").string();
         std::string err;
 
+        // The sidecar serves the page from here; keep the two in agreement.
+        _putenv_s("CLUI_WEB_ROOT", exe_dir().string().c_str());
+
         // Sidecar -> page. The reader thread is not the UI thread, so hop via
         // post() before touching the webview. Capture a pointer, not a
         // reference to the local result<>.
         auto *vp = &view.value();
 
+        // Navigation waits for the sidecar's first line, which it emits only
+        // after its loopback server is listening. WebView2 will not load
+        // subresources over file://, so the page must come from http://.
+        static std::atomic_bool navigated{false};
+
         const auto deliver = [app, vp](std::string line)
         {
+            if (!navigated.exchange(true))
+            {
+                app->post([vp]
+                          {
+                              const auto url = "http://127.0.0.1:17817/index.html";
+                              trace(std::string{"navigating to "} + url);
+                              vp->set_url(url);
+                          });
+            }
+
             app->post([vp, line = std::move(line)]
                       {
                           // smartview::execute is a FORMAT function, not a plain

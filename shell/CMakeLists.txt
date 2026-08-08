@@ -62,10 +62,25 @@ endif()
 
 add_custom_command(
   TARGET ${PROJECT_NAME} POST_BUILD
-  COMMAND ${CMAKE_COMMAND} -E copy_if_different
-          "${CMAKE_CURRENT_SOURCE_DIR}/web/index.html"
-          "$<TARGET_FILE_DIR:${PROJECT_NAME}>/index.html"
+  COMMAND ${CMAKE_COMMAND} -E copy_directory
+          "${CMAKE_CURRENT_SOURCE_DIR}/web"
+          "$<TARGET_FILE_DIR:${PROJECT_NAME}>"
   COMMAND ${CMAKE_COMMAND} -E copy_directory
           "${CMAKE_CURRENT_SOURCE_DIR}/sidecar"
           "$<TARGET_FILE_DIR:${PROJECT_NAME}>/sidecar"
 )
+
+# node-pty is a native module and stays external to the sidecar bundle, so it
+# has to be resolvable from the sidecar's own directory at runtime — Node walks
+# up from the requiring file looking for node_modules.
+set(_node_pty "${CMAKE_CURRENT_SOURCE_DIR}/../node_modules/node-pty")
+if (EXISTS "${_node_pty}")
+  add_custom_command(
+    TARGET ${PROJECT_NAME} POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+            "${_node_pty}"
+            "$<TARGET_FILE_DIR:${PROJECT_NAME}>/sidecar/node_modules/node-pty"
+  )
+else()
+  message(WARNING "shell: node-pty not found at ${_node_pty}; PTY channels will fail at runtime")
+endif()
