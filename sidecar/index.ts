@@ -258,7 +258,7 @@ async function gatewayCallJson(method: string, params: unknown = {}, timeoutMs =
  * matters — local config generally has no models section at all. Reading local
  * config here is why the picker came up empty.
  */
-async function fetchGatewayModelInfo() {
+async function _fetchGatewayModelInfoUncached() {
   const [modelsRes, agentsRes] = await Promise.all([
     gatewayCallJson('models.list'),
     gatewayCallJson('agents.list'),
@@ -297,6 +297,38 @@ async function fetchGatewayModelInfo() {
     providers: Array.from(byProvider.entries())
       .map(([id, models]) => ({ id, models: models.sort((a, b) => a.id.localeCompare(b.id)) }))
       .sort((a, b) => a.id.localeCompare(b.id)),
+  }
+}
+
+
+// The gateway round trip is ~9s, so an uncached picker leaves its dropdowns
+// empty long enough to look broken — and a component that re-renders fires the
+// call again. Cache the result and collapse concurrent callers onto one fetch.
+const GATEWAY_MODEL_TTL_MS = 60_000
+let gatewayModelCache: { at: number; value: Awaited<ReturnType<typeof _fetchGatewayModelInfoUncached>> } | null = null
+let gatewayModelInflight: ReturnType<typeof _fetchGatewayModelInfoUncached> | null = null
+
+function invalidateGatewayModelCache(): void {
+  gatewayModelCache = null
+}
+
+async function fetchGatewayModelInfo(force = false) {
+  if (!force && gatewayModelCache && Date.now() - gatewayModelCache.at < GATEWAY_MODEL_TTL_MS) {
+    return gatewayModelCache.value
+  }
+  // A second caller arriving mid-fetch waits on the same promise rather than
+  // starting another round trip.
+  if (gatewayModelInflight) return gatewayModelInflight
+
+  gatewayModelInflight = _fetchGatewayModelInfoUncached()
+  try {
+    const value = await gatewayModelInflight
+    // Only cache a real answer: caching null would pin a transient failure for
+    // a full minute.
+    if (value) gatewayModelCache = { at: Date.now(), value }
+    return value
+  } finally {
+    gatewayModelInflight = null
   }
 }
 
@@ -503,7 +535,13 @@ const handlers: Record<string, (args: any) => unknown | Promise<unknown>> = {
     return { ok: true, provider, model, providers }
   },
 
-  [IPC.OPENCLAW_SET_MODEL]: ({ model }: any) => runCli(['config', 'set', 'model', String(model)], 15000),
+  [IPC.OPENCLAW_SET_MODEL]: ({ model }: any) => {
+    const r = runCli(['config', 'set', 'model', String(model)], 15000)
+    // The cached list carries the current selection, so it is stale the moment
+    // the model changes.
+    invalidateGatewayModelCache()
+    return r
+  },
   [IPC.OPENCLAW_ONBOARD]: () => runCli(['onboard'], 60000),
   [IPC.OPENCLAW_RUN]: ({ args }: any) => runCli(Array.isArray(args) ? args.map(String) : [], 60000),
   // Returns NodeHostStatus (src/shared/types.ts:250) by parsing the CLI's
