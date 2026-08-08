@@ -339,51 +339,6 @@ function cancelPendingReveal(): void {
   }
 }
 
-/**
- * Turn off DWM's open/close transition for one window.
- *
- * Windows animates every ShowWindow while MinAnimate is 1, and on this
- * transparent frameless launcher that transition is the "summon animation".
- * It is not ours: with every renderer animation forcibly disabled, a per-frame
- * probe across six summons found the DOM byte-identical on all 226 sampled
- * frames — position, size, opacity and transform — spanning the reveal. So no
- * amount of renderer work could remove it, and neither could a different
- * framework: any toolkit that calls ShowWindow inherits the same transition.
- *
- * DWMWA_TRANSITIONS_FORCEDISABLED opts this single window out, without
- * touching the user's system-wide animation preference. Electron does not
- * expose it, so it is called through koffi against the raw HWND.
- *
- * Failure is non-fatal by design: the worst case is the animation comes back,
- * which is cosmetic and must never stop the launcher from starting.
- */
-function disableWindowTransitions(win: BrowserWindow): void {
-  if (process.platform !== 'win32') return
-  try {
-    const koffi = require('koffi')
-    const dwmapi = koffi.load('dwmapi.dll')
-    const DwmSetWindowAttribute = dwmapi.func(
-      'int __stdcall DwmSetWindowAttribute(uint64 hwnd, uint32 dwAttribute, void *pvAttribute, uint32 cbAttribute)',
-    )
-    const DWMWA_TRANSITIONS_FORCEDISABLED = 3
-
-    // getNativeWindowHandle() returns a Buffer holding the HWND itself, not a
-    // pointer to it — 8 bytes on x64, 4 on x86.
-    const handle = win.getNativeWindowHandle()
-    const hwnd = handle.length >= 8 ? handle.readBigUInt64LE(0) : BigInt(handle.readUInt32LE(0))
-
-    const enabled = Buffer.alloc(4)
-    enabled.writeInt32LE(1, 0)  // TRUE = transitions disabled
-    const hr = DwmSetWindowAttribute(hwnd, DWMWA_TRANSITIONS_FORCEDISABLED, enabled, 4)
-
-    log(hr === 0
-      ? `DWM transitions disabled for hwnd ${hwnd}`
-      : `DwmSetWindowAttribute returned 0x${(hr >>> 0).toString(16)} — summon animation may persist`)
-  } catch (err: any) {
-    log(`Could not disable DWM transitions: ${err?.message}`)
-  }
-}
-
 // ─── Visibility: park off-screen rather than hide/show ───
 //
 // Windows animates every ShowWindow — MinAnimate defaults to 1 — and on this
@@ -699,10 +654,6 @@ function createWindow(): void {
   // but explicit flags ensure correct behavior on older Electron builds.
   mainWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true })
   mainWindow.setAlwaysOnTop(true, 'screen-saver')
-
-  // Must happen before the first show() — this is what removes the summon
-  // animation, and it is a property of the window, not of how it is revealed.
-  disableWindowTransitions(mainWindow)
 
   mainWindow.once('ready-to-show', () => {
     // The only ShowWindow in the process lifetime. Every later dismiss/summon
@@ -2391,10 +2342,7 @@ ipcMain.on(IPC.WINDOW_DISMISS_READY, (_e, generation: number) => {
 })
 
 ipcMain.on(IPC.TRACE_SHELL, (_e, line: string) => {
-  // The summon trace is a multi-line frame dump — roughly 90 samples, ~11KB.
-  // The old 200-char cap silenced everything after the header, which would
-  // make a captured trace look empty rather than truncated.
-  if (SPACES_DEBUG) log(`[shell] ${String(line).slice(0, 20000)}`)
+  if (SPACES_DEBUG) log(`[shell] ${String(line).slice(0, 400)}`)
 })
 
 ipcMain.handle(IPC.GET_SHORTCUTS, async () => ({

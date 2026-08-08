@@ -44,29 +44,6 @@ const SUMMON_OUT = { duration: 0.11, ease: [0.4, 0, 1, 1] as const }
 /** Exit duration in ms, plus a frame, before telling main it may park. */
 const SUMMON_OUT_MS = 130
 
-/**
- * Timestamped framer-motion lifecycle marker.
- *
- * A summon that "jumps" needs one question answered first: was an animation
- * already in flight when the window was revealed? framer drives width/height
- * from its own rAF frameloop, which stalls while the window is hidden, and
- * JSAnimation times off absolute wall clock (`timestamp - startTime`) rather
- * than accumulated deltas — the 40ms `maxElapsed` clamp applies to the
- * batcher's `state.delta`, which no animation here reads. So an animation
- * still running at hide() does not resume where it stopped: on the first tick
- * after the window returns, its currentTime is the whole hidden gap, well past
- * the 260ms duration, and it snaps to its end state in a single frame.
- * Opacity and transform meanwhile go to WAAPI on the compositor clock, so the
- * two halves of one animation can land at different times.
- *
- * Timestamps are performance.now(), shared with the frame trace below.
- * Enabled only with CLUI_SPACES_DEBUG.
- */
-function traceAnim(who: string, phase: 'start' | 'complete'): void {
-  if (!window.__cluiTraceShell) return
-  window.clui.traceShell?.(`anim ${who} ${phase} @${performance.now().toFixed(1)}`)
-}
-
 export default function App() {
   useClaudeEvents()
   useHealthReconciliation()
@@ -137,12 +114,7 @@ export default function App() {
 
   // Every time the launcher is shown again, start from chat-only mode.
   useEffect(() => {
-    // When the window actually became visible. A summon spends its first
-    // stretch hidden, and a trace is only readable if it says which frames
-    // the user could see.
-    let revealedAt = 0
     const unsubShown = window.clui.onWindowShown(() => {
-      revealedAt = performance.now()
       // Re-enable motion BEFORE flipping onScreen, so the entrance is created
       // as a real animation rather than snapped like the layout was.
       // CLUI_NO_ANIM stays authoritative.
@@ -206,47 +178,6 @@ export default function App() {
       }
       requestAnimationFrame(settle)
 
-      // Diagnostic: record what the shell actually does across a summon.
-      //
-      // The previous probe stopped after 60 frames and logged only on change,
-      // which made a stalled rAF loop indistinguishable from a motionless
-      // element — it reported "nothing moved" for summons that were visibly
-      // jumping. rAF is not vsync-paced while the window is hidden (one
-      // measured first-tick took 709ms), so a frame budget can expire before
-      // the window is ever revealed. It also sampled only the bounding rect,
-      // which is blind to opacity and transform — and framer-motion drives
-      // exactly those through WAAPI, on a different clock from the rAF
-      // frameloop that carries width/height.
-      //
-      // Bound by wall clock, sample every frame, and emit every sample: an
-      // rAF stall then reads as a gap between timestamps instead of silence.
-      // Enabled only with CLUI_SPACES_DEBUG.
-      if (!window.__cluiTraceShell) return
-      revealedAt = 0
-      const shell = document.querySelector('[data-clui-shell]') as HTMLElement | null
-      const pill = document.querySelector('[data-tour="input"]') as HTMLElement | null
-      const t0 = performance.now()
-      const samples: string[] = []
-      const box = (el: HTMLElement | null): string => {
-        if (!el) return 'none'
-        const r = el.getBoundingClientRect()
-        const s = getComputedStyle(el)
-        return `${Math.round(r.x)},${Math.round(r.y)},${Math.round(r.width)}x${Math.round(r.height)}`
-          + ` op=${Number(s.opacity).toFixed(2)} tf=${s.transform === 'none' ? '-' : s.transform}`
-      }
-      const tick = (): void => {
-        const t = performance.now() - t0
-        samples.push(`+${t.toFixed(1)}ms ${revealedAt ? 'SHOWN' : 'hidden'} shell=[${box(shell)}] pill=[${box(pill)}]`)
-        if (t < 1500) {
-          requestAnimationFrame(tick)
-          return
-        }
-        window.clui.traceShell?.(
-          `summon trace — ${samples.length} frames over ${t.toFixed(0)}ms,`
-          + ` t0=${t0.toFixed(1)} (same clock as the anim markers)\n  ${samples.join('\n  ')}`
-        )
-      }
-      requestAnimationFrame(tick)
     })
 
     return () => { unsubShown(); unsubPrepare(); unsubDismiss() }
@@ -631,8 +562,6 @@ export default function App() {
               boxShadow: isExpanded ? colors.cardShadow : colors.cardShadowCollapsed,
             }}
             transition={TRANSITION}
-            onAnimationStart={() => traceAnim('shell', 'start')}
-            onAnimationComplete={() => traceAnim('shell', 'complete')}
             style={{
               borderWidth: 1,
               borderStyle: 'solid',
@@ -710,8 +639,6 @@ export default function App() {
                 opacity: isExpanded ? 1 : 0,
               }}
               transition={TRANSITION}
-              onAnimationStart={() => traceAnim('body', 'start')}
-              onAnimationComplete={() => traceAnim('body', 'complete')}
               className="overflow-hidden no-drag"
             >
               <div style={{ maxHeight: bodyMaxHeight }}>
