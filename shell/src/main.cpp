@@ -29,6 +29,8 @@
 
 #include <saucer/smartview.hpp>
 
+#include "sidecar.hpp"
+
 #ifdef _WIN32
 #include <windows.h>
 // stable_natives<window> is only forward-declared by the core headers; the
@@ -127,6 +129,57 @@ coco::stray start(saucer::application *app)
         co_return trace(std::string{"url::from failed: "} + index.error().message());
     }
 
+    // ─── Node sidecar ───
+    //
+    // The shell forwards opaque JSON lines in both directions and never parses
+    // the protocol. That is what keeps the port tractable: the existing
+    // handlers stay on Node, and adding a channel touches no C++ at all.
+    static shell::sidecar bridge;
+
+    // Page -> sidecar. Fire-and-forget; replies come back asynchronously below,
+    // which is also how a request/response API is built on a one-way pair.
+    view->expose("bridge_send",
+                 [](std::string line)
+                 {
+                     if (!bridge.send(line))
+                     {
+                         trace("bridge_send dropped (sidecar not running)");
+                     }
+                 });
+
+    {
+        const auto script = (exe_dir() / "sidecar" / "main.mjs").string();
+        std::string err;
+
+        // Sidecar -> page. The reader thread is not the UI thread, so hop via
+        // post() before touching the webview. Capture a pointer, not a
+        // reference to the local result<>.
+        auto *vp = &view.value();
+
+        const auto deliver = [app, vp](std::string line)
+        {
+            app->post([vp, line = std::move(line)]
+                      {
+                          // smartview::execute is a FORMAT function, not a plain
+                          // eval — it shadows webview::execute(cstring_view).
+                          // Splicing raw JSON into the format string would have
+                          // every '{' in the payload read as a format specifier,
+                          // so the line goes through as an argument and the
+                          // serializer quotes and escapes it. The page parses.
+                          vp->execute("window.__bridgeReceive && window.__bridgeReceive({})", line);
+                      });
+        };
+
+        if (!bridge.start(script, deliver, err))
+        {
+            trace("sidecar failed to start: " + err);
+        }
+        else
+        {
+            trace("sidecar started: " + script);
+        }
+    }
+
     view->set_url(index.value());
     window->show();
 
@@ -189,9 +242,21 @@ coco::stray start(saucer::application *app)
         .detach();
 #endif
 
+#ifdef _WIN32
+    {
+        RECT wr{};
+        if (GetWindowRect(window->native().hwnd, &wr))
+        {
+            trace("winrect " + std::to_string(wr.left) + "," + std::to_string(wr.top) + " " +
+                  std::to_string(wr.right - wr.left) + "x" + std::to_string(wr.bottom - wr.top));
+        }
+    }
+#endif
+
     trace("shown; polling cursor for hit-testing");
     co_await app->finish();
     running.store(false, std::memory_order_relaxed);
+    bridge.stop();
 }
 
 int main()

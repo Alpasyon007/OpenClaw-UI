@@ -65,4 +65,7 @@ add_custom_command(
   COMMAND ${CMAKE_COMMAND} -E copy_if_different
           "${CMAKE_CURRENT_SOURCE_DIR}/web/index.html"
           "$<TARGET_FILE_DIR:${PROJECT_NAME}>/index.html"
+  COMMAND ${CMAKE_COMMAND} -E copy_directory
+          "${CMAKE_CURRENT_SOURCE_DIR}/sidecar"
+          "$<TARGET_FILE_DIR:${PROJECT_NAME}>/sidecar"
 )
