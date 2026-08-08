@@ -1,12 +1,12 @@
 import { spawn, execSync, ChildProcess } from 'child_process'
 import { EventEmitter } from 'events'
 import { homedir } from 'os'
-import { join } from 'path'
+import { join, delimiter } from 'path'
 import { StreamParser } from '../stream-parser'
 import { normalize } from './event-normalizer'
 import { log as _log } from '../logger'
 import { getCliEnv } from '../cli-env'
-import { findCliBinary } from '../openclaw/runtime'
+import { getCliRuntime, type CliRuntime } from '../openclaw/runtime'
 import type { ClaudeEvent, NormalizedEvent, RunOptions, EnrichedError } from '../../shared/types'
 
 const MAX_RING_LINES = 100
@@ -93,19 +93,19 @@ export class RunManager extends EventEmitter {
   private activeRuns = new Map<string, RunHandle>()
   /** Holds recently-finished runs so diagnostics survive past process exit */
   private _finishedRuns = new Map<string, RunHandle>()
-  private claudeBinary: string
+  private runtime: CliRuntime
 
   constructor() {
     super()
-    this.claudeBinary = findCliBinary()
-    log(`CLI binary: ${this.claudeBinary}`)
+    this.runtime = getCliRuntime()
+    log(`CLI runtime: ${this.runtime.label}`)
   }
 
   private _getEnv(): NodeJS.ProcessEnv {
-    const env = getCliEnv()
-    const binDir = this.claudeBinary.substring(0, this.claudeBinary.lastIndexOf('/'))
-    if (env.PATH && !env.PATH.includes(binDir)) {
-      env.PATH = `${binDir}:${env.PATH}`
+    const env = getCliEnv(this.runtime.extraEnv)
+    const binDir = this.runtime.binDir
+    if (binDir && env.PATH && !env.PATH.split(delimiter).includes(binDir)) {
+      env.PATH = `${binDir}${delimiter}${env.PATH}`
     }
 
     return env
@@ -166,14 +166,16 @@ export class RunManager extends EventEmitter {
     // Always tell Claude it's inside CLUI (additive, doesn't replace base prompt)
     args.push('--append-system-prompt', CLUI_SYSTEM_HINT)
 
+    const spawnArgs = [...this.runtime.prefixArgs, ...args]
+
     if (DEBUG) {
-      log(`Starting run ${requestId}: ${this.claudeBinary} ${args.join(' ')}`)
+      log(`Starting run ${requestId}: ${this.runtime.command} ${spawnArgs.join(' ')}`)
       log(`Prompt: ${options.prompt.substring(0, 200)}`)
     } else {
       log(`Starting run ${requestId}`)
     }
 
-    const child = spawn(this.claudeBinary, args, {
+    const child = spawn(this.runtime.command, spawnArgs, {
       stdio: ['pipe', 'pipe', 'pipe'],
       cwd,
       env: this._getEnv(),

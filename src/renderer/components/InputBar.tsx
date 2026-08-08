@@ -4,7 +4,7 @@ import { Microphone, SpinnerGap, X, Check } from '@phosphor-icons/react'
 import { useSessionStore } from '../stores/sessionStore'
 import { AttachmentChips } from './AttachmentChips'
 import { SlashCommandMenu, getFilteredCommandsWithExtras, type SlashCommand } from './SlashCommandMenu'
-import { useColors } from '../theme'
+import { useColors, useBranding } from '../theme'
 
 const INPUT_MIN_HEIGHT = 20
 const INPUT_MAX_HEIGHT = 140
@@ -50,6 +50,7 @@ export function InputBar() {
   const activeTabId = useSessionStore((s) => s.activeTabId)
   const tab = useSessionStore((s) => s.tabs.find((t) => t.id === s.activeTabId))
   const colors = useColors()
+  const branding = useBranding()
   const isBusy = tab?.status === 'running' || tab?.status === 'connecting'
   const isConnecting = tab?.status === 'connecting'
   const hasContent = input.trim().length > 0 || (tab?.attachments?.length ?? 0) > 0
@@ -63,13 +64,13 @@ export function InputBar() {
   }))
 
   useEffect(() => {
-    textareaRef.current?.focus()
+    textareaRef.current?.focus({ preventScroll: true })
   }, [activeTabId])
 
   // Focus textarea when window is shown (shortcut toggle, screenshot return)
   useEffect(() => {
     const unsub = window.clui.onWindowShown(() => {
-      textareaRef.current?.focus()
+      textareaRef.current?.focus({ preventScroll: true })
     })
     return unsub
   }, [])
@@ -242,7 +243,7 @@ export function InputBar() {
     if (isSkillCommand) {
       setInput(`${cmd.command} `)
       setSlashFilter(null)
-      requestAnimationFrame(() => textareaRef.current?.focus())
+      requestAnimationFrame(() => textareaRef.current?.focus({ preventScroll: true }))
       return
     }
     setInput('')
@@ -291,7 +292,7 @@ export function InputBar() {
     if (!isExpanded) toggleExpanded()
     sendMessage(prompt || 'See attached files')
     // Refocus after React re-renders from the state update
-    requestAnimationFrame(() => textareaRef.current?.focus())
+    requestAnimationFrame(() => textareaRef.current?.focus({ preventScroll: true }))
   }, [input, isBusy, sendMessage, attachments.length, showSlashMenu, slashFilter, slashIndex, handleSlashSelect, openclawModels, activeProvider, setOpenclawModel, setPreferredModel, addSystemMessage, isExpanded, toggleExpanded])
 
   // ─── Keyboard ───
@@ -438,8 +439,8 @@ export function InputBar() {
                     : voiceState === 'transcribing'
                       ? 'Transcribing...'
                       : isBusy
-                        ? 'Waiting for OpenClaw to finish...'
-                        : 'Ask OpenClaw anything...'
+                        ? `Waiting for ${branding.assistantName} to finish...`
+                        : branding.inputPlaceholder
               }
               rows={1}
               className="w-full bg-transparent resize-none"
@@ -496,8 +497,8 @@ export function InputBar() {
                     : voiceState === 'transcribing'
                       ? 'Transcribing...'
                       : isBusy
-                        ? 'Waiting for OpenClaw to finish...'
-                        : 'Ask OpenClaw anything...'
+                        ? `Waiting for ${branding.assistantName} to finish...`
+                        : branding.inputPlaceholder
               }
               rows={1}
               className="flex-1 bg-transparent resize-none"

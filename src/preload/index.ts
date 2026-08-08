@@ -1,6 +1,8 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import { IPC } from '../shared/types'
-import type { RunOptions, NormalizedEvent, HealthReport, EnrichedError, Attachment, SessionMeta, CatalogPlugin, SessionLoadMessage } from '../shared/types'
+import type { RunOptions, NormalizedEvent, HealthReport, EnrichedError, Attachment, SessionMeta, CatalogPlugin, SessionLoadMessage, ConnectionTarget, GatewayConfigView, NodeAction, NodeHostStatus } from '../shared/types'
+import type { ShortcutDef } from '../shared/shortcuts'
+import type { Theme } from '../shared/theme-types'
 
 export interface CluiAPI {
   // ─── Request-response (renderer → main) ───
@@ -54,6 +56,30 @@ export interface CluiAPI {
   openclawSetModel(provider: string, model: string): Promise<{ ok: boolean; error?: string }>
   openclawRun(action: string): Promise<{ ok: boolean; output: string; error?: string }>
   getRuntimeMetrics(): Promise<{ cpuPercent: number; memoryMb: number; uptimeSec: number; timestamp: number }>
+
+  // ─── Node host + gateway ───
+  nodeStatus(): Promise<NodeHostStatus>
+  nodeAction(action: NodeAction): Promise<{ ok: boolean; output: string; error?: string }>
+  gatewayStatus(): Promise<{ ok: boolean; running: boolean; installed: boolean; output: string }>
+  gatewayProbe(): Promise<{
+    ok: boolean
+    reachable: boolean
+    capability: string | null
+    missingOperatorScope: boolean
+    output: string
+  }>
+  gatewayConfigGet(): Promise<GatewayConfigView>
+  gatewayConfigSet(patch: { mode?: 'local' | 'remote'; remoteUrl?: string; tokenEnvVar?: string }): Promise<{ ok: boolean; error?: string }>
+  getConnectionTarget(): Promise<ConnectionTarget>
+  setConnectionTarget(target: ConnectionTarget): Promise<{ ok: boolean; error?: string }>
+  getShortcuts(): Promise<{ platform: string; shortcuts: ShortcutDef[] }>
+
+  // ─── Theming + branding ───
+  exportTheme(theme: Theme, suggestedName: string): Promise<{ ok: boolean; cancelled?: boolean; path?: string; error?: string }>
+  importTheme(): Promise<{ ok: boolean; cancelled?: boolean; theme?: Theme; error?: string }>
+  setBranding(branding: { appName: string; tagline: string }): void
+  /** Diagnostic only — forwards shell geometry samples to the debug log. */
+  traceShell(line: string): void
   setPermissionMode(mode: string): void
   getTheme(): Promise<{ isDark: boolean }>
   onThemeChange(callback: (isDark: boolean) => void): () => void
@@ -73,6 +99,12 @@ export interface CluiAPI {
   onError(callback: (tabId: string, error: EnrichedError) => void): () => void
   onSkillStatus(callback: (status: { name: string; state: string; error?: string; reason?: string }) => void): () => void
   onWindowShown(callback: () => void): () => void
+  /** main -> renderer: settle the DOM; the window is about to be revealed. */
+  onWindowPrepare(callback: (generation: number) => void): () => void
+  onWindowDismiss(callback: (generation: number) => void): () => void
+  dismissReady(generation: number): void
+  /** renderer -> main: prepare pass painted, safe to reveal. */
+  windowReady(generation: number): void
   onShortcutAction(callback: (action: string) => void): () => void
   setDragHolding(holding: boolean): void
 }
@@ -116,6 +148,23 @@ const api: CluiAPI = {
   openclawSetModel: (provider, model) => ipcRenderer.invoke(IPC.OPENCLAW_SET_MODEL, { provider, model }),
   openclawRun: (action) => ipcRenderer.invoke(IPC.OPENCLAW_RUN, { action }),
   getRuntimeMetrics: () => ipcRenderer.invoke(IPC.GET_RUNTIME_METRICS),
+
+  // ─── Node host + gateway ───
+  nodeStatus: () => ipcRenderer.invoke(IPC.NODE_STATUS),
+  nodeAction: (action) => ipcRenderer.invoke(IPC.NODE_ACTION, { action }),
+  gatewayStatus: () => ipcRenderer.invoke(IPC.GATEWAY_STATUS),
+  gatewayProbe: () => ipcRenderer.invoke(IPC.GATEWAY_PROBE),
+  gatewayConfigGet: () => ipcRenderer.invoke(IPC.GATEWAY_CONFIG_GET),
+  gatewayConfigSet: (patch) => ipcRenderer.invoke(IPC.GATEWAY_CONFIG_SET, patch),
+  getConnectionTarget: () => ipcRenderer.invoke(IPC.GET_CONNECTION_TARGET),
+  setConnectionTarget: (target) => ipcRenderer.invoke(IPC.SET_CONNECTION_TARGET, target),
+  getShortcuts: () => ipcRenderer.invoke(IPC.GET_SHORTCUTS),
+
+  // ─── Theming + branding ───
+  exportTheme: (theme, suggestedName) => ipcRenderer.invoke(IPC.THEME_EXPORT, { theme, suggestedName }),
+  importTheme: () => ipcRenderer.invoke(IPC.THEME_IMPORT),
+  setBranding: (branding) => ipcRenderer.send(IPC.SET_BRANDING, branding),
+  traceShell: (line) => ipcRenderer.send(IPC.TRACE_SHELL, line),
   setPermissionMode: (mode) => ipcRenderer.send(IPC.SET_PERMISSION_MODE, mode),
   getTheme: () => ipcRenderer.invoke(IPC.GET_THEME),
   onThemeChange: (callback) => {
@@ -173,6 +222,22 @@ const api: CluiAPI = {
     return () => ipcRenderer.removeListener(IPC.WINDOW_SHOWN, handler)
   },
 
+  onWindowPrepare: (callback) => {
+    const handler = (_e: Electron.IpcRendererEvent, generation: number) => callback(generation)
+    ipcRenderer.on(IPC.WINDOW_PREPARE, handler)
+    return () => ipcRenderer.removeListener(IPC.WINDOW_PREPARE, handler)
+  },
+
+  windowReady: (generation) => ipcRenderer.send(IPC.WINDOW_READY, generation),
+
+  onWindowDismiss: (callback) => {
+    const handler = (_e: Electron.IpcRendererEvent, generation: number) => callback(generation)
+    ipcRenderer.on(IPC.WINDOW_DISMISS, handler)
+    return () => ipcRenderer.removeListener(IPC.WINDOW_DISMISS, handler)
+  },
+
+  dismissReady: (generation) => ipcRenderer.send(IPC.WINDOW_DISMISS_READY, generation),
+
   onShortcutAction: (callback) => {
     const handler = (_e: Electron.IpcRendererEvent, action: string) => callback(action)
     ipcRenderer.on('clui:shortcut-action', handler)
@@ -183,3 +248,9 @@ const api: CluiAPI = {
 }
 
 contextBridge.exposeInMainWorld('clui', api)
+
+// Diagnostic flag — only true when the app was started with CLUI_SPACES_DEBUG=1.
+contextBridge.exposeInMainWorld('__cluiTraceShell', process.env.CLUI_SPACES_DEBUG === '1')
+
+// Diagnostic flag — CLUI_NO_ANIM=1 disables every animation in the renderer.
+contextBridge.exposeInMainWorld('__cluiNoAnim', process.env.CLUI_NO_ANIM === '1')

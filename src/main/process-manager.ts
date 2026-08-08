@@ -1,11 +1,11 @@
-import { spawn, execSync, ChildProcess } from 'child_process'
+import { spawn, ChildProcess } from 'child_process'
 import { EventEmitter } from 'events'
 import { homedir } from 'os'
 import { appendFileSync } from 'fs'
-import { join } from 'path'
+import { join, delimiter } from 'path'
 import { StreamParser } from './stream-parser'
 import { getCliEnv } from './cli-env'
-import { findCliBinary } from './openclaw/runtime'
+import { getCliRuntime, type CliRuntime } from './openclaw/runtime'
 import type { ClaudeEvent, RunOptions } from '../shared/types'
 
 const LOG_FILE = join(homedir(), '.clui-debug.log')
@@ -27,13 +27,14 @@ export interface RunHandle {
  */
 export class ProcessManager extends EventEmitter {
   private activeRuns = new Map<string, RunHandle>()
-  private claudeBinary: string
+  private runtime: CliRuntime
 
   constructor() {
     super()
-    // Find the real binary — Electron doesn't inherit shell aliases or full PATH
-    this.claudeBinary = findCliBinary()
-    log(`CLI binary: ${this.claudeBinary}`)
+    // Resolve the real CLI — Electron inherits neither shell aliases nor a
+    // complete PATH, and on Windows the shim is not directly spawnable.
+    this.runtime = getCliRuntime()
+    log(`CLI runtime: ${this.runtime.label}`)
   }
 
   startRun(options: RunOptions): RunHandle {
@@ -69,20 +70,22 @@ export class ProcessManager extends EventEmitter {
       args.push('--system-prompt', options.systemPrompt)
     }
 
-    log(`Starting run ${runId}: ${this.claudeBinary} ${args.join(' ')}`)
+    const spawnArgs = [...this.runtime.prefixArgs, ...args]
+
+    log(`Starting run ${runId}: ${this.runtime.command} ${spawnArgs.join(' ')}`)
     log(`Prompt: ${options.prompt.substring(0, 200)}`)
 
     // Build environment: merge login shell PATH with Electron's env
     // Electron doesn't source ~/.zshrc so PATH is often incomplete
-    const env = getCliEnv()
+    const env = getCliEnv(this.runtime.extraEnv)
 
-    // Ensure our claude binary's directory is in PATH
-    const binDir = this.claudeBinary.substring(0, this.claudeBinary.lastIndexOf('/'))
-    if (env.PATH && !env.PATH.includes(binDir)) {
-      env.PATH = `${binDir}:${env.PATH}`
+    // Ensure the CLI's shim directory is on PATH
+    const binDir = this.runtime.binDir
+    if (binDir && env.PATH && !env.PATH.split(delimiter).includes(binDir)) {
+      env.PATH = `${binDir}${delimiter}${env.PATH}`
     }
 
-    const child = spawn(this.claudeBinary, args, {
+    const child = spawn(this.runtime.command, spawnArgs, {
       stdio: ['pipe', 'pipe', 'pipe'],
       cwd,
       env,

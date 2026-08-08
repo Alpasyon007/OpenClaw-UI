@@ -24,7 +24,8 @@ function ModelPicker() {
   const [open, setOpen] = useState(false)
   const triggerRef = useRef<HTMLButtonElement>(null)
   const popoverRef = useRef<HTMLDivElement>(null)
-  const [pos, setPos] = useState({ bottom: 0, left: 0 })
+  const listRef = useRef<HTMLDivElement>(null)
+  const [pos, setPos] = useState({ bottom: 0, left: 0, maxHeight: 260 })
 
   const isBusy = tab?.status === 'running' || tab?.status === 'connecting'
 
@@ -34,6 +35,10 @@ function ModelPicker() {
     setPos({
       bottom: window.innerHeight - rect.top + 6,
       left: rect.left,
+      // The list opens upward from the status bar, so it can only use the
+      // space above the trigger. Without this cap it grows past the top of
+      // the window and is clipped with no way to reach the hidden entries.
+      maxHeight: Math.max(120, Math.min(260, rect.top - 16)),
     })
   }, [])
 
@@ -47,6 +52,13 @@ function ModelPicker() {
     }
     document.addEventListener('mousedown', handler)
     return () => document.removeEventListener('mousedown', handler)
+  }, [open])
+
+  // With every provider's models in one list this can be dozens of rows, so
+  // open scrolled to the current selection rather than at the top.
+  useEffect(() => {
+    if (!open) return
+    listRef.current?.querySelector('[data-selected="true"]')?.scrollIntoView({ block: 'center' })
   }, [open])
 
   const handleToggle = () => {
@@ -102,14 +114,22 @@ function ModelPicker() {
             WebkitBackdropFilter: 'blur(20px)',
             boxShadow: colors.popoverShadow,
             border: `1px solid ${colors.popoverBorder}`,
+            display: 'flex',
+            flexDirection: 'column',
+            overflow: 'hidden',
           }}
         >
-          <div className="py-1">
+          <div
+            ref={listRef}
+            className="py-1"
+            style={{ maxHeight: pos.maxHeight, overflowY: 'auto', overscrollBehavior: 'contain' }}
+          >
             {openclawModels.map((m) => {
               const isSelected = preferredModel === m.id
               return (
                 <button
                   key={m.id}
+                  data-selected={isSelected ? 'true' : undefined}
                   onClick={() => {
                     setPreferredModel(m.id)
                     if (activeProvider) void setOpenclawModel(activeProvider, m.id)
@@ -212,9 +232,12 @@ function PermissionModePicker() {
             WebkitBackdropFilter: 'blur(20px)',
             boxShadow: colors.popoverShadow,
             border: `1px solid ${colors.popoverBorder}`,
+            overflow: 'hidden',
           }}
         >
-          <div className="py-1">
+          {/* Two options today, but capped so adding more cannot overflow the
+              window the way the model list did. */}
+          <div className="py-1" style={{ maxHeight: 240, overflowY: 'auto', overscrollBehavior: 'contain' }}>
             <button
               onClick={() => { setPermissionMode('ask'); setOpen(false) }}
               className="w-full flex items-center justify-between px-3 py-1.5 text-[11px] transition-colors"
@@ -377,9 +400,12 @@ export function StatusBar() {
               WebkitBackdropFilter: 'blur(20px)',
               boxShadow: colors.popoverShadow,
               border: `1px solid ${colors.popoverBorder}`,
+              overflow: 'hidden',
             }}
           >
-            <div className="py-1.5 px-1">
+            {/* Grows with each added directory — cap it so it cannot run off
+                the top of the window. */}
+            <div className="py-1.5 px-1" style={{ maxHeight: 300, overflowY: 'auto', overscrollBehavior: 'contain' }}>
               {/* Base directory */}
               <div className="px-2 py-1">
                 <div className="text-[9px] uppercase tracking-wider mb-1" style={{ color: colors.textTertiary }}>

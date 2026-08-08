@@ -10,3 +10,13 @@ declare global {
     clui: CluiAPI
   }
 }
+
+declare global {
+  interface Window {
+    /** Diagnostic flag set by the preload when window tracing is enabled. */
+    __cluiTraceShell?: boolean
+    /** Diagnostic flag set by the preload when CLUI_NO_ANIM=1 — all animation off. */
+    __cluiNoAnim?: boolean
+  }
+}
+export {}

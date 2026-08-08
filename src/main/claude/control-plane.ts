@@ -4,7 +4,7 @@ import { PtyRunManager } from './pty-run-manager'
 import { PermissionServer, maskSensitiveFields } from '../hooks/permission-server'
 import type { HookToolRequest, PermissionOption } from '../hooks/permission-server'
 import { log as _log } from '../logger'
-import { findCliBinary } from '../openclaw/runtime'
+import { getCliRuntime } from '../openclaw/runtime'
 import type {
   TabStatus,
   TabRegistryEntry,
@@ -12,6 +12,7 @@ import type {
   NormalizedEvent,
   RunOptions,
   EnrichedError,
+  ConnectionTarget,
 } from '../../shared/types'
 
 const MAX_QUEUE_DEPTH = 32
@@ -74,13 +75,17 @@ export class ControlPlane extends EventEmitter {
   private runTokens = new Map<string, string>()
   /** Global permission mode: 'ask' shows cards, 'auto' auto-approves */
   private permissionMode: 'ask' | 'auto' = 'ask'
+  /** Which agent runtime new runs target. 'auto' defers to the CLI's own config. */
+  private connectionTarget: ConnectionTarget = { mode: 'auto' }
   /** Resolves when the permission server is ready (or failed). Dispatch awaits this. */
   private hookServerReady: Promise<void>
 
   constructor(interactivePty = false) {
     super()
-    const cliBase = findCliBinary().split('/').pop() || ''
-    const isOpenclawCli = cliBase.includes('openclaw')
+    // Use the resolved runtime's declared kind. Deriving this from the binary
+    // path breaks on Windows, where the command is the Node executable and the
+    // CLI is a .mjs argument — the old check passed only by accident.
+    const isOpenclawCli = getCliRuntime().kind === 'openclaw'
     // OpenClaw does not support legacy -p stream-json flags, so PTY is mandatory.
     this.interactivePty = isOpenclawCli ? true : interactivePty
     this.runManager = new RunManager()
@@ -363,9 +368,15 @@ export class ControlPlane extends EventEmitter {
       }
 
       const handle = this.ptyRunManager.getHandle(requestId)
-      const openclawCompleted = !!(handle?.openclawTuiMode && handle.runCompleteEmitted)
+      // Read the recorded outcome, not merely "a terminal event was emitted" —
+      // the failure path emits one too, and treating that as success would
+      // overwrite the error status with 'completed' and hide the Retry button.
+      const openclawCompleted = !!(handle?.openclawTuiMode && handle.terminalOutcome === 'complete')
+      const openclawFailed = !!(handle?.openclawTuiMode && handle.terminalOutcome === 'error')
 
-      if (code === 0 || openclawCompleted) {
+      if (openclawFailed) {
+        this._setTabStatus(tabId, 'failed')
+      } else if (code === 0 || openclawCompleted) {
         this._setTabStatus(tabId, 'completed')
       } else if (signal) {
         this._setTabStatus(tabId, 'failed')
@@ -494,6 +505,21 @@ export class ControlPlane extends EventEmitter {
     this.permissionMode = mode
   }
 
+  /**
+   * Set which agent runtime subsequent runs target.
+   * Credentials are held in the main process only and never echoed back.
+   */
+  setConnectionTarget(target: ConnectionTarget): void {
+    this.connectionTarget = target
+    log(`Connection target set to: mode=${target.mode} url=${target.url || '(config)'} auth=${target.token ? 'token' : target.password ? 'password' : 'none'}`)
+  }
+
+  /** Returns the target with any credential stripped — safe to send to the renderer. */
+  getConnectionTarget(): ConnectionTarget {
+    const { mode, url } = this.connectionTarget
+    return { mode, url }
+  }
+
   closeTab(tabId: string): void {
     const tab = this.tabs.get(tabId)
     if (!tab) return
@@ -599,9 +625,23 @@ export class ControlPlane extends EventEmitter {
     // This prevents early prompts from silently falling back to --allowedTools.
     await this.hookServerReady
 
-    // Use stored session ID for resume if available and not overridden
-    if (tab.claudeSessionId && !options.sessionId) {
+    // Use stored session ID for resume if available and not overridden.
+    if (!options.sessionId && tab.claudeSessionId) {
       options = { ...options, sessionId: tab.claudeSessionId }
+    }
+
+    // OpenClaw's TUI takes `--session <key>`, which names a gateway session
+    // rather than resuming a recorded one, so a per-tab default is what keeps
+    // tabs from colliding on a single shared key. The Claude CLI instead maps
+    // sessionId onto `--resume`, where a synthetic id refers to a conversation
+    // that never existed and aborts the run — so only default it for OpenClaw.
+    if (!options.sessionId && getCliRuntime().kind === 'openclaw') {
+      options = { ...options, sessionId: `clui-${tabId}` }
+    }
+
+    // Route this run at the configured agent runtime unless the caller was explicit.
+    if (!options.connection) {
+      options = { ...options, connection: this.connectionTarget }
     }
 
     // Per-run token lifecycle: register run, generate per-run settings file

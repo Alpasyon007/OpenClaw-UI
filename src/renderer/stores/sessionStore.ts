@@ -48,6 +48,10 @@ interface State {
   openclawModels: OpenclawModelOption[]
   activeProvider: string | null
   currentOpenclawModel: string | null
+  /** True while a gateway model query or write is in flight (each is ~9s) */
+  openclawModelsLoading: boolean
+  /** Last model load/apply failure, surfaced instead of silently ignored */
+  openclawModelError: string | null
   openclawUpdateInfo: string | null
   openclawUpdateBusy: boolean
   /** Global permission mode: 'ask' shows cards, 'auto' auto-approves all tool calls */
@@ -56,7 +60,7 @@ interface State {
   // Marketplace state
   marketplaceOpen: boolean
   controlCenterOpen: boolean
-  controlCenterTab: 'agents' | 'settings'
+  controlCenterTab: 'agents' | 'settings' | 'appearance'
   skillBuilderOpen: boolean
   marketplaceCatalog: CatalogPlugin[]
   marketplaceLoading: boolean
@@ -83,9 +87,9 @@ interface State {
   toggleSkillBuilder: () => void
   openSkillBuilder: () => void
   closeSkillBuilder: () => void
-  openControlCenter: (tab?: 'agents' | 'settings') => void
+  openControlCenter: (tab?: 'agents' | 'settings' | 'appearance') => void
   closeControlCenter: () => void
-  setControlCenterTab: (tab: 'agents' | 'settings') => void
+  setControlCenterTab: (tab: 'agents' | 'settings' | 'appearance') => void
   closeMarketplace: () => void
   closeAuxPanels: () => void
   loadMarketplace: (forceRefresh?: boolean) => Promise<void>
@@ -183,6 +187,7 @@ function makeLocalTab(): TabState {
     workingDirectory: '~',
     hasChosenDirectory: false,
     additionalDirs: [],
+    gatewayState: 'unknown',
   }
 }
 
@@ -197,6 +202,8 @@ export const useSessionStore = create<State>((set, get) => ({
   openclawModels: [],
   activeProvider: null,
   currentOpenclawModel: null,
+  openclawModelsLoading: false,
+  openclawModelError: null,
   openclawUpdateInfo: null,
   openclawUpdateBusy: false,
   permissionMode: 'ask',
@@ -240,36 +247,58 @@ export const useSessionStore = create<State>((set, get) => ({
   },
 
   refreshOpenclawModels: async () => {
+    set({ openclawModelsLoading: true })
     try {
       const info = await window.clui.openclawModelInfo()
-      if (!info.ok) return
+      if (!info.ok) {
+        set({
+          openclawModelsLoading: false,
+          openclawModelError: (info as { error?: string }).error || 'Could not load models',
+        })
+        return
+      }
+      // Keep every provider's models, not just the active one — restricting
+      // the list to the current provider makes switching providers impossible.
       const options: OpenclawModelOption[] = []
-      const activeProvider = info.provider || null
-      const providerNode = info.providers.find((p) => p.id === activeProvider) || info.providers[0]
-      if (providerNode) {
-        for (const m of providerNode.models) {
-          options.push({ id: m.id, label: m.name || m.id, provider: providerNode.id })
+      for (const p of info.providers) {
+        for (const m of p.models) {
+          options.push({ id: m.id, label: m.name || m.id, provider: p.id })
         }
       }
+      const activeProvider = info.provider || info.providers[0]?.id || null
       set({
         openclawModels: options,
-        activeProvider: providerNode?.id || activeProvider,
+        activeProvider,
         currentOpenclawModel: info.model || null,
         preferredModel: info.model || null,
+        openclawModelsLoading: false,
+        openclawModelError: options.length === 0 ? 'No models available on this gateway' : null,
       })
-    } catch {}
+    } catch {
+      set({ openclawModelsLoading: false, openclawModelError: 'Could not load models' })
+    }
   },
 
   setOpenclawModel: async (provider, model) => {
+    set({ openclawModelsLoading: true, openclawModelError: null })
     try {
       const res = await window.clui.openclawSetModel(provider, model)
-      if (!res.ok) return
+      if (!res.ok) {
+        // Previously swallowed: the user clicked Apply and nothing happened,
+        // with no way to tell whether it worked.
+        set({ openclawModelsLoading: false, openclawModelError: res.error || 'Failed to apply model' })
+        return
+      }
       set({
         currentOpenclawModel: model,
         preferredModel: model,
         activeProvider: provider,
+        openclawModelsLoading: false,
+        openclawModelError: null,
       })
-    } catch {}
+    } catch {
+      set({ openclawModelsLoading: false, openclawModelError: 'Failed to apply model' })
+    }
   },
 
   checkOpenclawUpdate: async () => {
@@ -420,6 +449,11 @@ export const useSessionStore = create<State>((set, get) => ({
   },
 
   closeAuxPanels: () => {
+    // Called on every window show. Setting state unconditionally would notify
+    // every subscriber and re-render the shell while the entrance animation is
+    // running, so bail out when there is nothing open to close.
+    const s = get()
+    if (!s.marketplaceOpen && !s.controlCenterOpen && !s.skillBuilderOpen) return
     set({ marketplaceOpen: false, controlCenterOpen: false, skillBuilderOpen: false })
   },
 
@@ -1061,6 +1095,23 @@ export const useSessionStore = create<State>((set, get) => ({
             updated.currentActivity = `Waiting for permission: ${event.toolName}`
             break
           }
+
+          case 'gateway_state':
+            updated.gatewayState = event.state
+            // Only a disconnect is worth interrupting the timeline for;
+            // connect/reconnect churn would be noise.
+            if (event.state === 'disconnected') {
+              updated.messages = [
+                ...updated.messages,
+                {
+                  id: nextMsgId(),
+                  role: 'system',
+                  content: `Gateway disconnected${event.detail ? ` — ${event.detail}` : ''}`,
+                  timestamp: Date.now(),
+                },
+              ]
+            }
+            break
 
           case 'rate_limit':
             if (event.status !== 'allowed') {

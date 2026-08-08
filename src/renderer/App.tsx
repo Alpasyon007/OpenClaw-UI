@@ -1,5 +1,5 @@
 import React, { useEffect, useCallback, useMemo, useState } from 'react'
-import { motion, AnimatePresence } from 'framer-motion'
+import { motion, AnimatePresence, MotionGlobalConfig } from 'framer-motion'
 import { Paperclip, Camera, HeadCircuit, Sparkle, Wrench } from '@phosphor-icons/react'
 import { TabStrip } from './components/TabStrip'
 import { ConversationView } from './components/ConversationView'
@@ -19,6 +19,54 @@ import { useColors, useThemeStore, spacing } from './theme'
 
 const TRANSITION = { duration: 0.26, ease: [0.4, 0, 0.1, 1] as const }
 
+/**
+ * How long to wait for the shell's layout to stop changing before telling main
+ * it may reveal the window. Must exceed TRANSITION (260ms) so a shell mid-tween
+ * is never revealed, and must stay under the main-side watchdog
+ * (PRESENT_ACK_TIMEOUT_MS) so the ack still wins the race in the normal case.
+ */
+const SETTLE_CAP_MS = 320
+
+/**
+ * The summon entrance and exit, owned by the renderer.
+ *
+ * The window is no longer hidden between summons — it parks off-screen — so
+ * its compositor stays live and these play on a surface that is already warm.
+ * That is what makes a launcher entrance viable at all here: the earlier
+ * attempts fought a renderer that was being torn down.
+ *
+ * Opacity and a small rise, no scale: the exit has to finish before main parks
+ * the window, so it is kept shorter than the entrance to stay responsive.
+ * Durations are paired with DISMISS_ACK_TIMEOUT_MS in the main process.
+ */
+const SUMMON_IN = { duration: 0.16, ease: [0.16, 1, 0.3, 1] as const }
+const SUMMON_OUT = { duration: 0.11, ease: [0.4, 0, 1, 1] as const }
+/** Exit duration in ms, plus a frame, before telling main it may park. */
+const SUMMON_OUT_MS = 130
+
+/**
+ * Timestamped framer-motion lifecycle marker.
+ *
+ * A summon that "jumps" needs one question answered first: was an animation
+ * already in flight when the window was revealed? framer drives width/height
+ * from its own rAF frameloop, which stalls while the window is hidden, and
+ * JSAnimation times off absolute wall clock (`timestamp - startTime`) rather
+ * than accumulated deltas — the 40ms `maxElapsed` clamp applies to the
+ * batcher's `state.delta`, which no animation here reads. So an animation
+ * still running at hide() does not resume where it stopped: on the first tick
+ * after the window returns, its currentTime is the whole hidden gap, well past
+ * the 260ms duration, and it snaps to its end state in a single frame.
+ * Opacity and transform meanwhile go to WAAPI on the compositor clock, so the
+ * two halves of one animation can land at different times.
+ *
+ * Timestamps are performance.now(), shared with the frame trace below.
+ * Enabled only with CLUI_SPACES_DEBUG.
+ */
+function traceAnim(who: string, phase: 'start' | 'complete'): void {
+  if (!window.__cluiTraceShell) return
+  window.clui.traceShell?.(`anim ${who} ${phase} @${performance.now().toFixed(1)}`)
+}
+
 export default function App() {
   useClaudeEvents()
   useHealthReconciliation()
@@ -32,6 +80,9 @@ export default function App() {
   const setSystemTheme = useThemeStore((s) => s.setSystemTheme)
   const expandedUI = useThemeStore((s) => s.expandedUI)
   const [showOnboarding, setShowOnboarding] = useState(false)
+  // Drives the summon entrance/exit. Starts true so the launcher is present on
+  // first paint at startup, where there is nothing to animate in from.
+  const [onScreen, setOnScreen] = useState(true)
   const [draggingFiles, setDraggingFiles] = useState(false)
   const [tourOpen, setTourOpen] = useState(false)
   const [tourStep, setTourStep] = useState(0)
@@ -86,9 +137,119 @@ export default function App() {
 
   // Every time the launcher is shown again, start from chat-only mode.
   useEffect(() => {
-    return window.clui.onWindowShown(() => {
-      useSessionStore.getState().closeAuxPanels()
+    // When the window actually became visible. A summon spends its first
+    // stretch hidden, and a trace is only readable if it says which frames
+    // the user could see.
+    let revealedAt = 0
+    const unsubShown = window.clui.onWindowShown(() => {
+      revealedAt = performance.now()
+      // Re-enable motion BEFORE flipping onScreen, so the entrance is created
+      // as a real animation rather than snapped like the layout was.
+      // CLUI_NO_ANIM stays authoritative.
+      if (!window.__cluiNoAnim) MotionGlobalConfig.skipAnimations = false
+      setOnScreen(true)
     })
+
+    const unsubDismiss = window.clui.onWindowDismiss((generation) => {
+      // Play the exit, then let main park the window. Main also runs its own
+      // watchdog, so a missed ack costs a snap, never a stuck launcher.
+      if (!window.__cluiNoAnim) MotionGlobalConfig.skipAnimations = false
+      setOnScreen(false)
+      setTimeout(() => window.clui.dismissReady(generation), SUMMON_OUT_MS)
+    })
+
+    const unsubPrepare = window.clui.onWindowPrepare((generation) => {
+      // Runs while the window is still HIDDEN. Everything that changes layout
+      // on summon belongs here, so the first visible frame is already correct.
+      //
+      // Animate nothing during a summon. Two recordings showed the bar
+      // assembling on screen — 48x9 -> 646x53 -> 663x56 -> 700x89 over ~200ms
+      // — because tweens were still resolving when the window was revealed.
+      // A launcher's entrance is not the place for motion: the user asked for
+      // it, and it should simply be there, finished.
+      //
+      // skipAnimations is checked before an animation is created, so anything
+      // this handler triggers (closeAuxPanels, and the layout that follows)
+      // resolves straight to its final keyframe. Anything already in flight
+      // from before the hide is handled by the settle gate below.
+      MotionGlobalConfig.skipAnimations = true
+      useSessionStore.getState().closeAuxPanels()
+      // Snap to the entrance start state while still off screen, so the
+      // entrance has somewhere to animate from and none of it is spent unseen.
+      setOnScreen(false)
+
+      // Ack when the layout has actually stopped moving.
+      //
+      // This used to ack after two rAFs, which proves React committed and
+      // painted — but not that layout settled. The shell's width/height
+      // animations and framer's measurement of `height: 'auto'` can still be
+      // resolving, so the window was revealed into a half-built layout and the
+      // user watched the bar assemble: measured at 48x9 -> 646x53 -> 663x56 ->
+      // 700x89 over ~200ms, in two independent screen recordings.
+      //
+      // Wait for the shell's rect to repeat across consecutive frames instead,
+      // capped so a permanently-animating UI can still be summoned.
+      const settleStart = performance.now()
+      let stableFrames = 0
+      let lastSig = ''
+      const settle = (): void => {
+        const el = document.querySelector('[data-clui-shell]') as HTMLElement | null
+        const r = el?.getBoundingClientRect()
+        const sig = r ? `${Math.round(r.width)}x${Math.round(r.height)}@${Math.round(r.y)}` : 'none'
+        stableFrames = sig === lastSig ? stableFrames + 1 : 0
+        lastSig = sig
+        if (stableFrames >= 3 || performance.now() - settleStart > SETTLE_CAP_MS) {
+          window.clui.windowReady(generation)
+          return
+        }
+        requestAnimationFrame(settle)
+      }
+      requestAnimationFrame(settle)
+
+      // Diagnostic: record what the shell actually does across a summon.
+      //
+      // The previous probe stopped after 60 frames and logged only on change,
+      // which made a stalled rAF loop indistinguishable from a motionless
+      // element — it reported "nothing moved" for summons that were visibly
+      // jumping. rAF is not vsync-paced while the window is hidden (one
+      // measured first-tick took 709ms), so a frame budget can expire before
+      // the window is ever revealed. It also sampled only the bounding rect,
+      // which is blind to opacity and transform — and framer-motion drives
+      // exactly those through WAAPI, on a different clock from the rAF
+      // frameloop that carries width/height.
+      //
+      // Bound by wall clock, sample every frame, and emit every sample: an
+      // rAF stall then reads as a gap between timestamps instead of silence.
+      // Enabled only with CLUI_SPACES_DEBUG.
+      if (!window.__cluiTraceShell) return
+      revealedAt = 0
+      const shell = document.querySelector('[data-clui-shell]') as HTMLElement | null
+      const pill = document.querySelector('[data-tour="input"]') as HTMLElement | null
+      const t0 = performance.now()
+      const samples: string[] = []
+      const box = (el: HTMLElement | null): string => {
+        if (!el) return 'none'
+        const r = el.getBoundingClientRect()
+        const s = getComputedStyle(el)
+        return `${Math.round(r.x)},${Math.round(r.y)},${Math.round(r.width)}x${Math.round(r.height)}`
+          + ` op=${Number(s.opacity).toFixed(2)} tf=${s.transform === 'none' ? '-' : s.transform}`
+      }
+      const tick = (): void => {
+        const t = performance.now() - t0
+        samples.push(`+${t.toFixed(1)}ms ${revealedAt ? 'SHOWN' : 'hidden'} shell=[${box(shell)}] pill=[${box(pill)}]`)
+        if (t < 1500) {
+          requestAnimationFrame(tick)
+          return
+        }
+        window.clui.traceShell?.(
+          `summon trace — ${samples.length} frames over ${t.toFixed(0)}ms,`
+          + ` t0=${t0.toFixed(1)} (same clock as the anim markers)\n  ${samples.join('\n  ')}`
+        )
+      }
+      requestAnimationFrame(tick)
+    })
+
+    return () => { unsubShown(); unsubPrepare(); unsubDismiss() }
   }, [])
 
   const onboardingInfo = useMemo(() => {
@@ -172,13 +333,29 @@ export default function App() {
     if (current !== 'control-center' && controlCenterOpen) useSessionStore.getState().closeControlCenter()
   }, [tourOpen, tourStep, tourSteps, marketplaceOpen, controlCenterOpen])
 
-  // OS-level click-through (RAF-throttled to avoid per-pixel IPC)
+  // OS-level click-through.
+  //
+  // document.elementFromPoint() forces a synchronous style + layout flush, so
+  // running it on every mousemove stalls the compositor — worst exactly when
+  // the pointer sweeps toward a window that is mid-entrance-animation. Sample
+  // at most once per frame instead, and skip entirely if the pointer has not
+  // actually moved to a new position.
   useEffect(() => {
     if (!window.clui?.setIgnoreMouseEvents) return
     let lastIgnored: boolean | null = null
+    let pending: number | null = null
+    let lastX = -1
+    let lastY = -1
+    let nextX = 0
+    let nextY = 0
 
-    const onMouseMove = (e: MouseEvent) => {
-      const el = document.elementFromPoint(e.clientX, e.clientY)
+    const sample = () => {
+      pending = null
+      if (nextX === lastX && nextY === lastY) return
+      lastX = nextX
+      lastY = nextY
+
+      const el = document.elementFromPoint(nextX, nextY)
       const isUI = !!(el && el.closest('[data-clui-ui]'))
       const shouldIgnore = !isUI
       if (shouldIgnore !== lastIgnored) {
@@ -191,6 +368,12 @@ export default function App() {
       }
     }
 
+    const onMouseMove = (e: MouseEvent) => {
+      nextX = e.clientX
+      nextY = e.clientY
+      if (pending === null) pending = requestAnimationFrame(sample)
+    }
+
     const onMouseLeave = () => {
       if (lastIgnored !== true) {
         lastIgnored = true
@@ -201,6 +384,7 @@ export default function App() {
     document.addEventListener('mousemove', onMouseMove)
     document.addEventListener('mouseleave', onMouseLeave)
     return () => {
+      if (pending !== null) cancelAnimationFrame(pending)
       document.removeEventListener('mousemove', onMouseMove)
       document.removeEventListener('mouseleave', onMouseLeave)
     }
@@ -250,7 +434,14 @@ export default function App() {
   const cardExpandedWidth = expandedUI ? 700 : 460
   const cardCollapsedWidth = expandedUI ? 670 : 430
   const cardCollapsedMargin = expandedUI ? 15 : 15
-  const bodyMaxHeight = expandedUI ? 520 : 400
+
+  // The column is bottom-anchored inside a fixed-height window, so anything
+  // that does not fit is clipped off the TOP — where the takeover panels live.
+  // When one is open the conversation yields most of its height to it, and the
+  // panel itself is additionally capped to the viewport.
+  const takeoverOpen = controlCenterOpen || marketplaceOpen || skillBuilderOpen
+  const bodyMaxHeight = takeoverOpen ? 150 : expandedUI ? 520 : 400
+  const panelMaxHeight = 'min(560px, calc(100vh - 300px))'
 
   const handleScreenshot = useCallback(async () => {
     const result = await window.clui.takeScreenshot()
@@ -274,7 +465,11 @@ export default function App() {
       <div className="flex flex-col justify-end h-full" style={{ background: 'transparent' }}>
 
         {/* ─── 460px content column, centered. Circles overflow left. ─── */}
-        <div style={{ width: contentWidth, position: 'relative', margin: '0 auto', transition: 'width 0.26s cubic-bezier(0.4, 0, 0.1, 1)' }}>
+        <motion.div
+          animate={{ opacity: onScreen ? 1 : 0, y: onScreen ? 0 : 10 }}
+          transition={onScreen ? SUMMON_IN : SUMMON_OUT}
+          style={{ width: contentWidth, position: 'relative', margin: '0 auto', transition: 'width 0.26s cubic-bezier(0.4, 0, 0.1, 1)' }}
+        >
 
           {showOnboarding && onboardingInfo && (
             <div
@@ -331,7 +526,10 @@ export default function App() {
                     className="glass-surface overflow-hidden no-drag"
                     style={{
                       borderRadius: 24,
-                      maxHeight: 560,
+                      maxHeight: panelMaxHeight,
+                      minHeight: 0,
+                      display: 'flex',
+                      flexDirection: 'column',
                     }}
                   >
                     <ControlCenterPanel />
@@ -365,7 +563,10 @@ export default function App() {
                     className="glass-surface overflow-hidden no-drag"
                     style={{
                       borderRadius: 24,
-                      maxHeight: 470,
+                      maxHeight: `min(470px, calc(100vh - 300px))`,
+                      minHeight: 0,
+                      display: 'flex',
+                      flexDirection: 'column',
                     }}
                   >
                     <MarketplacePanel />
@@ -398,7 +599,10 @@ export default function App() {
                     className="glass-surface overflow-hidden no-drag"
                     style={{
                       borderRadius: 24,
-                      maxHeight: 560,
+                      maxHeight: panelMaxHeight,
+                      minHeight: 0,
+                      display: 'flex',
+                      flexDirection: 'column',
                     }}
                   >
                     <SkillBuilderPanel />
@@ -415,6 +619,7 @@ export default function App() {
           */}
           <motion.div
             data-clui-ui
+            data-clui-shell
             className="overflow-hidden flex flex-col drag-region"
             animate={{
               width: isExpanded ? cardExpandedWidth : cardCollapsedWidth,
@@ -426,6 +631,8 @@ export default function App() {
               boxShadow: isExpanded ? colors.cardShadow : colors.cardShadowCollapsed,
             }}
             transition={TRANSITION}
+            onAnimationStart={() => traceAnim('shell', 'start')}
+            onAnimationComplete={() => traceAnim('shell', 'complete')}
             style={{
               borderWidth: 1,
               borderStyle: 'solid',
@@ -503,6 +710,8 @@ export default function App() {
                 opacity: isExpanded ? 1 : 0,
               }}
               transition={TRANSITION}
+              onAnimationStart={() => traceAnim('body', 'start')}
+              onAnimationComplete={() => traceAnim('body', 'complete')}
               className="overflow-hidden no-drag"
             >
               <div style={{ maxHeight: bodyMaxHeight }}>
@@ -524,7 +733,7 @@ export default function App() {
               <InputBar />
             </div>
           </div>
-        </div>
+        </motion.div>
       </div>
       <GuidedTourOverlay
         open={tourOpen}

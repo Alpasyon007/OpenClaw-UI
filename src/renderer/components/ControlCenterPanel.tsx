@@ -1,8 +1,12 @@
-import React, { useEffect, useState } from 'react'
+import React, { useEffect, useRef, useState } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
-import { X, Robot, SlidersHorizontal, Terminal, Play, Stop, ArrowsClockwise, FolderOpen, Keyboard, ClipboardText, Heartbeat, Sparkle } from '@phosphor-icons/react'
+import { X, Robot, SlidersHorizontal, Terminal, Play, Stop, ArrowsClockwise, FolderOpen, Keyboard, ClipboardText, Heartbeat, Sparkle, Palette } from '@phosphor-icons/react'
 import { useSessionStore } from '../stores/sessionStore'
 import { useColors } from '../theme'
+import { useShortcuts } from '../hooks/useShortcuts'
+import { formatShortcut } from '../../shared/shortcuts'
+import { ScrollableSelect } from './ScrollableSelect'
+import { AppearancePanel } from './AppearancePanel'
 
 function formatStatusText(text: string | null | undefined, maxLines = 5): string {
   if (!text) return ''
@@ -49,11 +53,15 @@ export function ControlCenterPanel() {
   const close = useSessionStore((s) => s.closeControlCenter)
 
   return (
-    <div data-clui-ui style={{ height: 560, display: 'flex', flexDirection: 'column' }}>
+    // Fills whatever height the parent allows rather than demanding 560px —
+    // a fixed height here is what pushed the panel off the top of the window
+    // when a conversation was open below it.
+    <div data-clui-ui style={{ flex: 1, minHeight: 0, maxHeight: 560, display: 'flex', flexDirection: 'column' }}>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '14px 18px', borderBottom: `1px solid ${colors.containerBorder}` }}>
         <div style={{ display: 'flex', gap: 8 }}>
           <TabBtn active={tab === 'agents'} label="Agents" icon={<Robot size={14} />} onClick={() => setTab('agents')} colors={colors} />
           <TabBtn active={tab === 'settings'} label="Settings" icon={<SlidersHorizontal size={14} />} onClick={() => setTab('settings')} colors={colors} />
+          <TabBtn active={tab === 'appearance'} label="Appearance" icon={<Palette size={14} />} onClick={() => setTab('appearance')} colors={colors} />
         </div>
         <button onClick={close} style={{ background: 'none', border: 'none', color: colors.textTertiary, cursor: 'pointer' }}>
           <X size={15} />
@@ -62,27 +70,17 @@ export function ControlCenterPanel() {
 
       <div style={{ flex: 1, overflowY: 'auto', padding: 16 }}>
         <AnimatePresence mode="wait" initial={false}>
-          {tab === 'agents' ? (
-            <motion.div
-              key="agents-tab"
-              initial={{ opacity: 0, y: 10, scale: 0.995 }}
-              animate={{ opacity: 1, y: 0, scale: 1 }}
-              exit={{ opacity: 0, y: -8, scale: 0.995 }}
-              transition={{ duration: 0.18, ease: [0.22, 1, 0.36, 1] }}
-            >
-              <AgentsTab />
-            </motion.div>
-          ) : (
-            <motion.div
-              key="settings-tab"
-              initial={{ opacity: 0, y: 10, scale: 0.995 }}
-              animate={{ opacity: 1, y: 0, scale: 1 }}
-              exit={{ opacity: 0, y: -8, scale: 0.995 }}
-              transition={{ duration: 0.18, ease: [0.22, 1, 0.36, 1] }}
-            >
-              <SettingsTab />
-            </motion.div>
-          )}
+          <motion.div
+            key={`${tab}-tab`}
+            initial={{ opacity: 0, y: 10, scale: 0.995 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: -8, scale: 0.995 }}
+            transition={{ duration: 0.18, ease: [0.22, 1, 0.36, 1] }}
+          >
+            {tab === 'agents' && <AgentsTab />}
+            {tab === 'settings' && <SettingsTab />}
+            {tab === 'appearance' && <AppearancePanel />}
+          </motion.div>
         </AnimatePresence>
       </div>
     </div>
@@ -200,9 +198,16 @@ function AgentsTab() {
           <div style={{ fontSize: 11, color: colors.textSecondary }}>Active tasks: {activeTasks}</div>
         </div>
       </Card>
-      <Card title="Gateway" colors={colors}>
-        <Action onClick={() => { void run('gateway_start') }} label="Start Gateway" icon={<Play size={11} />} colors={colors} />
-        <Action onClick={() => { void run('gateway_stop') }} label="Stop Gateway" icon={<Stop size={11} />} colors={colors} />
+      <ConnectionCard colors={colors} onLog={appendLog} />
+      <NodeHostCard colors={colors} onLog={appendLog} />
+      <Card title="Local Gateway" colors={colors}>
+        <div style={{ fontSize: 10, color: colors.textTertiary, marginBottom: 7, lineHeight: 1.45 }}>
+          Runs a gateway on this machine (loopback). Not used while the connection above targets a remote gateway.
+        </div>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+          <Action onClick={() => { void run('gateway_start') }} label="Start" icon={<Play size={11} />} colors={colors} />
+          <Action onClick={() => { void run('gateway_stop') }} label="Stop" icon={<Stop size={11} />} colors={colors} />
+        </div>
       </Card>
       <Card title="Channels" colors={colors}>
         <Action onClick={() => { void run('channels_status') }} label="Channel Status" icon={<ArrowsClockwise size={11} />} colors={colors} />
@@ -291,6 +296,7 @@ function AgentsTab() {
 
 function SettingsTab() {
   const colors = useColors()
+  const { platform, shortcuts } = useShortcuts()
   const openclawModels = useSessionStore((s) => s.openclawModels)
   const activeProvider = useSessionStore((s) => s.activeProvider)
   const currentModel = useSessionStore((s) => s.currentOpenclawModel)
@@ -303,6 +309,8 @@ function SettingsTab() {
   const staticInfo = useSessionStore((s) => s.staticInfo)
   const toggleMarketplace = useSessionStore((s) => s.toggleMarketplace)
   const closeControlCenter = useSessionStore((s) => s.closeControlCenter)
+  const modelsLoading = useSessionStore((s) => s.openclawModelsLoading)
+  const modelError = useSessionStore((s) => s.openclawModelError)
   const [healthChecking, setHealthChecking] = useState(false)
   const [healthText, setHealthText] = useState<string | null>(null)
   const [showShortcuts, setShowShortcuts] = useState(false)
@@ -313,17 +321,24 @@ function SettingsTab() {
   const [pendingModel, setPendingModel] = useState<string>('')
 
   useEffect(() => {
+    let cancelled = false
     void (async () => {
-      await refresh()
+      // One fetch, not two. Against a remote gateway each round trip is ~9s,
+      // so the previous refresh()-then-fetch pair left the dropdowns empty
+      // long enough to look like the picker was broken.
       const info = await window.clui.openclawModelInfo()
-      if (!info.ok) return
+      if (cancelled || !info.ok) return
       const ids = info.providers.map((p) => p.id)
       const map: Record<string, Array<{ id: string; name: string }>> = {}
       for (const p of info.providers) map[p.id] = p.models
       setProviders(ids)
       setProviderModels(map)
       setPendingProvider(info.provider || ids[0] || '')
+      // Populate the shared store from the same payload (main-side caching
+      // makes this second call effectively free).
+      void refresh()
     })()
+    return () => { cancelled = true }
   }, [refresh])
 
   useEffect(() => {
@@ -371,17 +386,14 @@ function SettingsTab() {
     }
   }
 
+  const shortcutLines = [
+    ...shortcuts.map((s) => `${formatShortcut(s, platform)} — ${s.action}`),
+    'Esc — Hide window',
+  ]
+
   const copyShortcutCheatsheet = async () => {
-    const sheet = [
-      'Alt+Space — Toggle launcher',
-      'Cmd/Ctrl+Shift+K — Toggle launcher fallback',
-      'Cmd/Ctrl+Shift+M — Open community skills',
-      'Cmd/Ctrl+Shift+A — Open agents control center',
-      'Cmd/Ctrl+Shift+S — Open settings control center',
-      'Esc — Hide window',
-    ].join('\n')
     try {
-      await navigator.clipboard.writeText(sheet)
+      await navigator.clipboard.writeText(shortcutLines.join('\n'))
       setUtilityText('Shortcut list copied.')
     } catch {
       setUtilityText('Failed to copy shortcut list.')
@@ -394,53 +406,68 @@ function SettingsTab() {
         <div style={{ fontSize: 11, color: colors.textSecondary, marginBottom: 8 }}>
           OpenClaw currently enforces one active provider at a time.
         </div>
+        {modelsLoading && (
+          <div style={{ fontSize: 10, color: colors.textTertiary, marginBottom: 8 }}>
+            Talking to the gateway — this takes a few seconds...
+          </div>
+        )}
+        {modelError && (
+          <div style={{ fontSize: 10, color: '#ef4444', marginBottom: 8, lineHeight: 1.45 }}>
+            {modelError}
+          </div>
+        )}
+        {!modelsLoading && !modelError && providers.length === 0 && (
+          <div style={{ fontSize: 10, color: '#f59e0b', marginBottom: 8, lineHeight: 1.45 }}>
+            No models reported. If you are on a remote gateway, its credentials may not cover any model.
+          </div>
+        )}
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginBottom: 8 }}>
-          <select
+          <ScrollableSelect
+            ariaLabel="Provider"
             value={pendingProvider}
-            onChange={(e) => setPendingProvider(e.target.value)}
-            style={{
-              width: '100%',
-              fontSize: 12,
-              borderRadius: 8,
-              background: colors.surfacePrimary,
-              color: colors.textPrimary,
-              border: `1px solid ${colors.containerBorder}`,
-              padding: '8px 9px',
-            }}
-          >
-            {(providers.length > 0 ? providers : [activeProvider || '']).filter(Boolean).map((providerId) => (
-              <option key={providerId} value={providerId}>{providerId}</option>
-            ))}
-          </select>
+            onChange={setPendingProvider}
+            disabled={modelsLoading}
+            placeholder="Provider..."
+            options={(providers.length > 0 ? providers : [activeProvider || ''])
+              .filter(Boolean)
+              .map((providerId) => ({ value: providerId, label: providerId }))}
+          />
           <div style={{ fontSize: 11, color: colors.textSecondary, display: 'flex', alignItems: 'center', paddingLeft: 6 }}>
             Active provider: <strong style={{ marginLeft: 4 }}>{activeProvider || 'unknown'}</strong>
           </div>
         </div>
-        <select
+        <ScrollableSelect
+          ariaLabel="Model"
           value={pendingModel}
-          onChange={(e) => setPendingModel(e.target.value)}
-          style={{
-            width: '100%',
-            fontSize: 12,
-            borderRadius: 8,
-            background: colors.surfacePrimary,
-            color: colors.textPrimary,
-            border: `1px solid ${colors.containerBorder}`,
-            padding: '8px 9px',
-          }}
-        >
-          {visibleModels.map((m) => (
-            <option key={m.id} value={m.id}>{m.name || m.id} ({m.id})</option>
-          ))}
-        </select>
-        <div style={{ marginTop: 8, display: 'flex', gap: 7 }}>
+          onChange={setPendingModel}
+          disabled={modelsLoading}
+          placeholder={visibleModels.length === 0 ? 'No models available' : 'Model...'}
+          options={visibleModels.map((m) => ({
+            value: m.id,
+            label: m.name && m.name !== m.id ? `${m.name}` : m.id,
+            hint: m.name && m.name !== m.id ? m.id : undefined,
+          }))}
+        />
+        <div style={{ marginTop: 8, display: 'flex', gap: 7, alignItems: 'center' }}>
           <Action
             onClick={() => { if (pendingProvider && pendingModel) void setOpenclawModel(pendingProvider, pendingModel) }}
-            label="Apply Model"
+            label={modelsLoading ? 'Applying...' : 'Apply Model'}
             icon={<Play size={11} />}
             colors={colors}
+            disabled={modelsLoading || !pendingProvider || !pendingModel}
           />
-          <Action onClick={() => { void refresh() }} label="Refresh" icon={<ArrowsClockwise size={11} />} colors={colors} />
+          <Action
+            onClick={() => { void refresh() }}
+            label="Refresh"
+            icon={<ArrowsClockwise size={11} />}
+            colors={colors}
+            disabled={modelsLoading}
+          />
+          {currentModel && (
+            <span style={{ fontSize: 10, color: colors.textTertiary, overflowWrap: 'anywhere' }}>
+              Active: {activeProvider}/{currentModel}
+            </span>
+          )}
         </div>
       </Card>
 
@@ -490,12 +517,7 @@ function SettingsTab() {
         </div>
         {showShortcuts && (
           <div style={{ marginTop: 8, fontSize: 10, color: colors.textSecondary, whiteSpace: 'pre-wrap', lineHeight: 1.45, overflowWrap: 'anywhere' }}>
-            Alt+Space — Toggle launcher{'\n'}
-            Cmd/Ctrl+Shift+K — Toggle launcher fallback{'\n'}
-            Cmd/Ctrl+Shift+M — Open community skills{'\n'}
-            Cmd/Ctrl+Shift+A — Open agents control center{'\n'}
-            Cmd/Ctrl+Shift+S — Open settings control center{'\n'}
-            Esc — Hide window
+            {shortcutLines.join('\n')}
           </div>
         )}
         {utilityText && (
@@ -517,6 +539,275 @@ function SettingsTab() {
   )
 }
 
+type Colors = ReturnType<typeof useColors>
+
+function StatusDot({ tone }: { tone: 'ok' | 'warn' | 'bad' | 'idle' }) {
+  const color = tone === 'ok' ? '#22c55e' : tone === 'warn' ? '#f59e0b' : tone === 'bad' ? '#ef4444' : '#6b7280'
+  return (
+    <span
+      style={{
+        width: 8,
+        height: 8,
+        borderRadius: 99,
+        background: color,
+        flexShrink: 0,
+        boxShadow: `0 0 10px ${color}66`,
+      }}
+    />
+  )
+}
+
+function Field({ label, value, colors }: { label: string; value: string; colors: Colors }) {
+  return (
+    <div style={{ display: 'flex', gap: 6, fontSize: 10, lineHeight: 1.5 }}>
+      <span style={{ color: colors.textTertiary, flexShrink: 0 }}>{label}</span>
+      <span style={{ color: colors.textSecondary, overflowWrap: 'anywhere' }}>{value}</span>
+    </div>
+  )
+}
+
+/**
+ * Which agent runtime prompts are routed to, plus a live reachability probe.
+ *
+ * `auto` defers to the CLI's own `gateway.mode`. Selecting Remote both writes
+ * `gateway.mode: "remote"` (the key the CLI actually reads) and sets an
+ * explicit per-run target, so routing does not depend on config alone.
+ */
+function ConnectionCard({ colors, onLog }: { colors: Colors; onLog: (line: string) => void }) {
+  const [config, setConfig] = useState<import('../../shared/types').GatewayConfigView | null>(null)
+  const [mode, setMode] = useState<import('../../shared/types').ConnectionMode>('auto')
+  const [probe, setProbe] = useState<{ reachable: boolean; capability: string | null; missingOperatorScope: boolean } | null>(null)
+  const [busy, setBusy] = useState(false)
+  // Tracked separately so the button label reflects what is actually running
+  // rather than reporting "Probing..." during an unrelated mode switch.
+  const [probing, setProbing] = useState(false)
+  const aliveRef = useRef(true)
+
+  const refresh = async () => {
+    try {
+      const [cfg, target] = await Promise.all([
+        window.clui.gatewayConfigGet(),
+        window.clui.getConnectionTarget(),
+      ])
+      if (!aliveRef.current) return
+      setConfig(cfg)
+      setMode(target.mode)
+    } catch {
+      if (aliveRef.current) onLog('Failed to read gateway configuration')
+    }
+  }
+
+  useEffect(() => {
+    aliveRef.current = true
+    void refresh()
+    return () => { aliveRef.current = false }
+  }, [])
+
+  const applyMode = async (next: import('../../shared/types').ConnectionMode) => {
+    if (busy) return
+    setBusy(true)
+    try {
+      if (next === 'gateway') {
+        if (!config?.remoteUrl) {
+          onLog('No remote gateway URL configured — set gateway.remote.url first')
+          return
+        }
+        // Persist the mode the CLI reads, then set the explicit run target.
+        const saved = await window.clui.gatewayConfigSet({ mode: 'remote' })
+        if (!saved.ok) { onLog(`Gateway config update failed: ${saved.error}`); return }
+        const res = await window.clui.setConnectionTarget({ mode: 'gateway', url: config.remoteUrl })
+        if (!res.ok) { onLog(`Connection failed: ${res.error}`); return }
+      } else {
+        if (next === 'local') await window.clui.gatewayConfigSet({ mode: 'local' })
+        const res = await window.clui.setConnectionTarget({ mode: next })
+        if (!res.ok) { onLog(`Connection failed: ${res.error}`); return }
+      }
+      setMode(next)
+      onLog(`Connection target set to ${next}`)
+      await refresh()
+    } finally {
+      if (aliveRef.current) setBusy(false)
+    }
+  }
+
+  const testConnection = async () => {
+    if (busy) return
+    setBusy(true)
+    setProbing(true)
+    onLog('Probing gateway...')
+    try {
+      const res = await window.clui.gatewayProbe()
+      if (!aliveRef.current) return
+      setProbe(res)
+      onLog(
+        res.reachable
+          ? `Gateway reachable — capability: ${res.capability || 'unknown'}`
+          : 'Gateway unreachable',
+      )
+    } catch {
+      if (aliveRef.current) onLog('Gateway probe failed')
+    } finally {
+      if (aliveRef.current) {
+        setBusy(false)
+        setProbing(false)
+      }
+    }
+  }
+
+  const tone = !probe ? 'idle' : !probe.reachable ? 'bad' : probe.missingOperatorScope ? 'warn' : 'ok'
+
+  return (
+    <Card title="Connection" colors={colors}>
+      <div style={{ display: 'grid', gap: 6 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 7, fontSize: 11, color: colors.textSecondary }}>
+          <StatusDot tone={tone} />
+          {!probe ? 'Not tested' : !probe.reachable ? 'Unreachable' : probe.missingOperatorScope ? 'Connected — limited scope' : 'Connected'}
+        </div>
+
+        <div style={{ display: 'flex', gap: 5 }}>
+          {(['auto', 'local', 'gateway'] as const).map((m) => (
+            <button
+              key={m}
+              disabled={busy}
+              onClick={() => { void applyMode(m) }}
+              style={{
+                fontSize: 10,
+                fontWeight: 600,
+                borderRadius: 999,
+                padding: '3px 9px',
+                cursor: busy ? 'default' : 'pointer',
+                fontFamily: 'inherit',
+                border: `1px solid ${mode === m ? colors.accent : colors.containerBorder}`,
+                background: mode === m ? colors.accentLight : colors.surfacePrimary,
+                color: mode === m ? colors.accent : colors.textSecondary,
+                opacity: busy ? 0.6 : 1,
+              }}
+            >
+              {m === 'auto' ? 'Auto' : m === 'local' ? 'Local' : 'Remote'}
+            </button>
+          ))}
+        </div>
+
+        <Field label="URL" value={config?.remoteUrl || '(not configured)'} colors={colors} />
+        <Field label="Config mode" value={config?.mode || '(unset — resolves to local)'} colors={colors} />
+        <Field
+          label="Token"
+          value={
+            config?.tokenRef
+              ? `${config.tokenRef.id} ${config.tokenResolvable ? '✓ resolved' : '✗ not set'}`
+              : '(none)'
+          }
+          colors={colors}
+        />
+
+        {probe?.missingOperatorScope && (
+          <div style={{ fontSize: 10, color: '#f59e0b', lineHeight: 1.45 }}>
+            Credential connects but lacks operator scope — chat will be rejected. Grant
+            operator.read/operator.write on the gateway, or pair this device.
+          </div>
+        )}
+
+        <div style={{ marginTop: 2 }}>
+          <Action
+            onClick={() => { void testConnection() }}
+            label={probing ? 'Probing...' : 'Test Connection'}
+            icon={<Heartbeat size={11} />}
+            colors={colors}
+            disabled={busy}
+          />
+        </div>
+      </div>
+    </Card>
+  )
+}
+
+/** This machine's node host service — the process that lets the gateway reach it. */
+function NodeHostCard({ colors, onLog }: { colors: Colors; onLog: (line: string) => void }) {
+  const [status, setStatus] = useState<import('../../shared/types').NodeHostStatus | null>(null)
+  const [busy, setBusy] = useState(false)
+  const aliveRef = useRef(true)
+
+  const refresh = async () => {
+    try {
+      const next = await window.clui.nodeStatus()
+      if (aliveRef.current) setStatus(next)
+    } catch {
+      if (aliveRef.current) onLog('Failed to read node host status')
+    }
+  }
+
+  // Self-scheduling rather than setInterval: each `node status` shells out to
+  // the CLI and takes seconds, so a fixed interval would overlap calls and
+  // queue them without bound. Re-arm only after the previous one settles.
+  useEffect(() => {
+    aliveRef.current = true
+    let timer: ReturnType<typeof setTimeout> | null = null
+
+    const loop = async () => {
+      await refresh()
+      if (!aliveRef.current) return
+      timer = setTimeout(() => { void loop() }, 15000)
+    }
+    void loop()
+
+    return () => {
+      aliveRef.current = false
+      if (timer) clearTimeout(timer)
+    }
+  }, [])
+
+  const act = async (action: import('../../shared/types').NodeAction) => {
+    if (busy) return
+    setBusy(true)
+    onLog(`node ${action}...`)
+    try {
+      const res = await window.clui.nodeAction(action)
+      onLog(res.ok ? `node ${action} succeeded` : `node ${action} failed: ${res.error}`)
+      await refresh()
+    } finally {
+      if (aliveRef.current) setBusy(false)
+    }
+  }
+
+  const tone = !status ? 'idle' : status.running ? 'ok' : status.installed ? 'warn' : 'bad'
+  const label = !status
+    ? 'Checking...'
+    : status.running
+      ? `Running${status.pid ? ` (pid ${status.pid})` : ''}`
+      : status.installed
+        ? 'Installed — stopped'
+        : 'Not installed'
+
+  return (
+    <Card title="Node Host" colors={colors}>
+      <div style={{ display: 'grid', gap: 6 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 7, fontSize: 11, color: colors.textSecondary }}>
+          <StatusDot tone={tone} />
+          {label}
+        </div>
+
+        <Field label="Name" value={status?.displayName || '(unregistered)'} colors={colors} />
+        <Field
+          label="Gateway"
+          value={status?.gatewayHost ? `${status.gatewayHost}:${status.gatewayPort ?? 443}${status.tls ? ' (TLS)' : ''}` : '(none)'}
+          colors={colors}
+        />
+        <Field label="Service" value={status?.serviceKind || '(none)'} colors={colors} />
+
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5, marginTop: 2 }}>
+          {status?.running
+            ? <Action onClick={() => { void act('stop') }} label="Stop" icon={<Stop size={11} />} colors={colors} disabled={busy} />
+            : <Action onClick={() => { void act('start') }} label="Start" icon={<Play size={11} />} colors={colors} disabled={busy} />}
+          <Action onClick={() => { void act('restart') }} label="Restart" icon={<ArrowsClockwise size={11} />} colors={colors} disabled={busy} />
+          {!status?.installed && (
+            <Action onClick={() => { void act('install') }} label="Install" icon={<Sparkle size={11} />} colors={colors} disabled={busy} />
+          )}
+        </div>
+      </div>
+    </Card>
+  )
+}
+
 function Card({ title, children, colors }: { title: string; children: React.ReactNode; colors: ReturnType<typeof useColors> }) {
   return (
     <div style={{ border: `1px solid ${colors.containerBorder}`, borderRadius: 12, background: colors.surfaceHover, padding: 11 }}>
@@ -526,10 +817,19 @@ function Card({ title, children, colors }: { title: string; children: React.Reac
   )
 }
 
-function Action({ onClick, label, icon, colors }: { onClick: () => void; label: string; icon: React.ReactNode; colors: ReturnType<typeof useColors> }) {
+function Action({ onClick, label, icon, colors, disabled = false }: {
+  onClick: () => void
+  label: string
+  icon: React.ReactNode
+  colors: ReturnType<typeof useColors>
+  /** Blocks the click outright — dimming alone still lets queued clicks
+   *  spawn duplicate CLI processes (e.g. two concurrent `node install`). */
+  disabled?: boolean
+}) {
   return (
     <button
-      onClick={onClick}
+      onClick={disabled ? undefined : onClick}
+      disabled={disabled}
       style={{
         fontSize: 11,
         fontWeight: 600,
@@ -538,7 +838,8 @@ function Action({ onClick, label, icon, colors }: { onClick: () => void; label: 
         color: colors.textSecondary,
         borderRadius: 8,
         padding: '6px 9px',
-        cursor: 'pointer',
+        cursor: disabled ? 'default' : 'pointer',
+        opacity: disabled ? 0.55 : 1,
         display: 'inline-flex',
         alignItems: 'center',
         gap: 6,

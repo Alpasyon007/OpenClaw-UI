@@ -3,6 +3,11 @@
  * Colors derived from ChatCN oklch system and design-fixed.html reference.
  */
 import { create } from 'zustand'
+import { derivePalette } from './theme-derive'
+import { BUILT_IN_THEMES, DEFAULT_THEME_ID, findBuiltIn } from './theme-presets'
+import { validateTheme, type Theme } from '../shared/theme-types'
+
+export { BUILT_IN_THEMES }
 
 // ─── Color palettes ───
 
@@ -268,6 +273,12 @@ const lightColors = {
 
 export type ColorPalette = { [K in keyof typeof darkColors]: string }
 
+/**
+ * The original hardcoded palettes are retained purely as the shape reference
+ * for ColorPalette and as a last-resort fallback. Live colours come from
+ * derivePalette() against the active theme's seeds.
+ */
+
 // ─── Theme store ───
 
 export type ThemeMode = 'system' | 'light' | 'dark'
@@ -279,13 +290,30 @@ interface ThemeState {
   expandedUI: boolean
   /** OS-reported dark mode — used when themeMode is 'system' */
   _systemIsDark: boolean
+  /** The active theme (built-in or user-authored). */
+  theme: Theme
+  /** User-authored themes, persisted locally. */
+  customThemes: Theme[]
+  /** Derived palette for the current theme + mode. */
+  palette: ColorPalette
   setIsDark: (isDark: boolean) => void
   setThemeMode: (mode: ThemeMode) => void
   setSoundEnabled: (enabled: boolean) => void
   setExpandedUI: (expanded: boolean) => void
   /** Called by OS theme change listener — updates system value */
   setSystemTheme: (isDark: boolean) => void
+  /** Switch to a theme by id (built-in or custom). */
+  selectTheme: (id: string) => void
+  /** Create or update a custom theme and make it active. */
+  upsertCustomTheme: (theme: Theme) => void
+  /** Patch the active theme; auto-forks built-ins into an editable copy. */
+  updateActiveTheme: (patch: DeepPartial<Theme>) => void
+  deleteCustomTheme: (id: string) => void
+  /** Restore the shipped default. */
+  resetTheme: () => void
 }
+
+type DeepPartial<T> = { [K in keyof T]?: T[K] extends object ? DeepPartial<T[K]> : T[K] }
 
 /** Convert camelCase token name to --clui-kebab-case CSS custom property */
 function camelToKebab(s: string): string {
@@ -300,82 +328,201 @@ function syncTokensToCss(tokens: ColorPalette): void {
   }
 }
 
-function applyTheme(isDark: boolean): void {
+/** Non-colour theme values that CSS also needs. */
+function syncThemeShapeToCss(theme: Theme): void {
+  const style = document.documentElement.style
+  const fx = theme.effects || { radius: 20, glow: 0.6, blur: 18 }
+  style.setProperty('--clui-radius', `${fx.radius}px`)
+  style.setProperty('--clui-radius-sm', `${Math.max(2, Math.round(fx.radius * 0.5))}px`)
+  style.setProperty('--clui-radius-lg', `${Math.round(fx.radius * 1.2)}px`)
+  style.setProperty('--clui-blur', `${fx.blur}px`)
+  style.setProperty('--clui-glow', String(fx.glow))
+  style.setProperty('--clui-font-sans', theme.typography?.sans || 'system-ui, sans-serif')
+  style.setProperty('--clui-font-mono', theme.typography?.mono || 'ui-monospace, monospace')
+}
+
+/** Compute the palette for a theme in a given mode. */
+function paletteFor(theme: Theme, isDark: boolean): ColorPalette {
+  try {
+    const seeds = isDark ? theme.dark : theme.light
+    const overrides = isDark ? theme.overrides?.dark : theme.overrides?.light
+    return derivePalette(seeds, theme.effects, isDark, overrides as Partial<ColorPalette> | undefined)
+  } catch {
+    // A malformed theme must never leave the app unrenderable.
+    return isDark ? darkColors : lightColors
+  }
+}
+
+function applyTheme(isDark: boolean, theme: Theme): void {
   document.documentElement.classList.toggle('dark', isDark)
   document.documentElement.classList.toggle('light', !isDark)
-  syncTokensToCss(isDark ? darkColors : lightColors)
+  syncTokensToCss(paletteFor(theme, isDark))
+  syncThemeShapeToCss(theme)
 }
 
 const SETTINGS_KEY = 'clui-settings'
 
-function loadSettings(): { themeMode: ThemeMode; soundEnabled: boolean; expandedUI: boolean } {
-  try {
-    const raw = localStorage.getItem(SETTINGS_KEY)
-    if (raw) {
-      const parsed = JSON.parse(raw)
-      return {
-        themeMode: ['light', 'dark'].includes(parsed.themeMode) ? parsed.themeMode : 'dark',
-        soundEnabled: typeof parsed.soundEnabled === 'boolean' ? parsed.soundEnabled : true,
-        expandedUI: typeof parsed.expandedUI === 'boolean' ? parsed.expandedUI : false,
-      }
-    }
-  } catch {}
-  return { themeMode: 'dark', soundEnabled: true, expandedUI: false }
+interface PersistedSettings {
+  themeMode: ThemeMode
+  soundEnabled: boolean
+  expandedUI: boolean
+  themeId: string
+  customThemes: Theme[]
 }
 
-function saveSettings(s: { themeMode: ThemeMode; soundEnabled: boolean; expandedUI: boolean }): void {
+function loadSettings(): PersistedSettings {
+  const fallback: PersistedSettings = {
+    themeMode: 'dark', soundEnabled: true, expandedUI: false,
+    themeId: DEFAULT_THEME_ID, customThemes: [],
+  }
+  try {
+    const raw = localStorage.getItem(SETTINGS_KEY)
+    if (!raw) return fallback
+    const parsed = JSON.parse(raw)
+    // Custom themes are user data that becomes live CSS — validate each one
+    // rather than trusting whatever is in localStorage.
+    const customThemes: Theme[] = Array.isArray(parsed.customThemes)
+      ? parsed.customThemes
+          .map((t: unknown) => validateTheme(t))
+          .filter((r: any) => r.ok)
+          .map((r: any) => r.theme)
+      : []
+    return {
+      themeMode: ['light', 'dark', 'system'].includes(parsed.themeMode) ? parsed.themeMode : 'dark',
+      soundEnabled: typeof parsed.soundEnabled === 'boolean' ? parsed.soundEnabled : true,
+      expandedUI: typeof parsed.expandedUI === 'boolean' ? parsed.expandedUI : false,
+      themeId: typeof parsed.themeId === 'string' ? parsed.themeId : DEFAULT_THEME_ID,
+      customThemes,
+    }
+  } catch {
+    return fallback
+  }
+}
+
+function saveSettings(s: PersistedSettings): void {
   try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(s)) } catch {}
 }
 
 // Respect persisted settings on launch (including full-width mode).
 const saved = loadSettings()
 
-export const useThemeStore = create<ThemeState>((set, get) => ({
-  isDark: saved.themeMode === 'dark' ? true : saved.themeMode === 'light' ? false : true,
-  themeMode: saved.themeMode,
-  soundEnabled: saved.soundEnabled,
-  expandedUI: saved.expandedUI,
-  _systemIsDark: true,
-  setIsDark: (isDark) => {
-    set({ isDark })
-    applyTheme(isDark)
-  },
-  setThemeMode: (mode) => {
-    const resolved = mode === 'system' ? get()._systemIsDark : mode === 'dark'
-    set({ themeMode: mode, isDark: resolved })
-    applyTheme(resolved)
-    saveSettings({ themeMode: mode, soundEnabled: get().soundEnabled, expandedUI: get().expandedUI })
-  },
-  setSoundEnabled: (enabled) => {
-    set({ soundEnabled: enabled })
-    saveSettings({ themeMode: get().themeMode, soundEnabled: enabled, expandedUI: get().expandedUI })
-  },
-  setExpandedUI: (expanded) => {
-    set({ expandedUI: expanded })
-    saveSettings({ themeMode: get().themeMode, soundEnabled: get().soundEnabled, expandedUI: expanded })
-  },
-  setSystemTheme: (isDark) => {
-    set({ _systemIsDark: isDark })
-    // Only apply if following system
-    if (get().themeMode === 'system') {
-      set({ isDark })
-      applyTheme(isDark)
-    }
-  },
-}))
+function resolveTheme(id: string, customs: Theme[]): Theme {
+  return findBuiltIn(id) || customs.find((t) => t.id === id) || findBuiltIn(DEFAULT_THEME_ID)!
+}
 
-// Initialize CSS vars with saved theme
-syncTokensToCss(saved.themeMode === 'light' ? lightColors : darkColors)
+const initialTheme = resolveTheme(saved.themeId, saved.customThemes)
+const initialIsDark = saved.themeMode === 'light' ? false : true
+
+export const useThemeStore = create<ThemeState>((set, get) => {
+  /** Recompute the palette, push it to CSS, and persist. */
+  const commit = (next: Partial<ThemeState>): void => {
+    const s = { ...get(), ...next }
+    const palette = paletteFor(s.theme, s.isDark)
+    set({ ...next, palette } as Partial<ThemeState>)
+    applyTheme(s.isDark, s.theme)
+    saveSettings({
+      themeMode: s.themeMode,
+      soundEnabled: s.soundEnabled,
+      expandedUI: s.expandedUI,
+      themeId: s.theme.id,
+      customThemes: s.customThemes,
+    })
+    // Branding renames what the user sees in the window title and tray.
+    try {
+      window.clui?.setBranding?.({
+        appName: s.theme.branding.appName,
+        tagline: s.theme.branding.tagline,
+      })
+    } catch {
+      // Preload not ready yet — the next commit will carry it.
+    }
+  }
+
+  return {
+    isDark: initialIsDark,
+    themeMode: saved.themeMode,
+    soundEnabled: saved.soundEnabled,
+    expandedUI: saved.expandedUI,
+    _systemIsDark: true,
+    theme: initialTheme,
+    customThemes: saved.customThemes,
+    palette: paletteFor(initialTheme, initialIsDark),
+
+    setIsDark: (isDark) => commit({ isDark }),
+    setThemeMode: (mode) => {
+      const resolved = mode === 'system' ? get()._systemIsDark : mode === 'dark'
+      commit({ themeMode: mode, isDark: resolved })
+    },
+    setSoundEnabled: (enabled) => commit({ soundEnabled: enabled }),
+    setExpandedUI: (expanded) => commit({ expandedUI: expanded }),
+    setSystemTheme: (isDark) => {
+      set({ _systemIsDark: isDark })
+      if (get().themeMode === 'system') commit({ isDark })
+    },
+
+    selectTheme: (id) => {
+      const theme = resolveTheme(id, get().customThemes)
+      commit({ theme })
+    },
+
+    upsertCustomTheme: (theme) => {
+      const check = validateTheme(theme)
+      if (!check.ok) return
+      const custom = { ...check.theme, builtIn: false }
+      const rest = get().customThemes.filter((t) => t.id !== custom.id)
+      commit({ customThemes: [...rest, custom], theme: custom })
+    },
+
+    updateActiveTheme: (patch) => {
+      const current = get().theme
+      // Built-ins are read-only: editing one forks it into a custom copy so
+      // the shipped presets always remain available to return to.
+      const base: Theme = current.builtIn
+        ? { ...current, id: `${current.id}-custom-${Date.now().toString(36)}`, name: `${current.name} (custom)`, builtIn: false }
+        : current
+
+      const merged: Theme = {
+        ...base,
+        ...(patch as Partial<Theme>),
+        dark: { ...base.dark, ...(patch.dark || {}) },
+        light: { ...base.light, ...(patch.light || {}) },
+        effects: { ...base.effects, ...(patch.effects || {}) },
+        typography: { ...base.typography, ...(patch.typography || {}) },
+        branding: { ...base.branding, ...(patch.branding || {}) },
+        builtIn: false,
+      }
+
+      const rest = get().customThemes.filter((t) => t.id !== merged.id)
+      commit({ customThemes: [...rest, merged], theme: merged })
+    },
+
+    deleteCustomTheme: (id) => {
+      const customThemes = get().customThemes.filter((t) => t.id !== id)
+      const theme = get().theme.id === id ? findBuiltIn(DEFAULT_THEME_ID)! : get().theme
+      commit({ customThemes, theme })
+    },
+
+    resetTheme: () => commit({ theme: findBuiltIn(DEFAULT_THEME_ID)! }),
+  }
+})
+
+// Initialize CSS vars with the saved theme before first paint.
+applyTheme(initialIsDark, initialTheme)
 
 /** Reactive hook — returns the active color palette */
 export function useColors(): ColorPalette {
-  const isDark = useThemeStore((s) => s.isDark)
-  return isDark ? darkColors : lightColors
+  return useThemeStore((s) => s.palette)
+}
+
+/** Reactive hook — the active theme's branding. */
+export function useBranding(): Theme['branding'] {
+  return useThemeStore((s) => s.theme.branding)
 }
 
 /** Non-reactive getter — use outside React components */
 export function getColors(isDark: boolean): ColorPalette {
-  return isDark ? darkColors : lightColors
+  const s = useThemeStore.getState()
+  return s.isDark === isDark ? s.palette : paletteFor(s.theme, isDark)
 }
 
 // ─── Backward compatibility ───

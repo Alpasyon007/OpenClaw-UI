@@ -2,6 +2,9 @@ import React, { useEffect, useMemo, useState } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
 import { RocketLaunch, Terminal, FolderOpen, Wrench, X, Key, Plugs, Compass, ArrowRight, ArrowLeft, Check, Keyboard } from '@phosphor-icons/react'
 import { useColors } from '../theme'
+import { useShortcuts } from '../hooks/useShortcuts'
+import { formatShortcut } from '../../shared/shortcuts'
+import { ScrollableSelect } from './ScrollableSelect'
 
 interface OnboardingInfo {
   version: string
@@ -29,6 +32,7 @@ export function OnboardingPanel({
   onDismiss: () => void
 }) {
   const colors = useColors()
+  const { platform, shortcuts } = useShortcuts()
   const [step, setStep] = useState(0)
 
   const versionKnown = !!info.version && info.version !== 'unknown'
@@ -198,16 +202,13 @@ export function OnboardingPanel({
             {step === 2 && (
               <Block title="Provider API Key" icon={<Key size={13} />} colors={colors}>
                 <div style={{ display: 'grid', gap: 8 }}>
-                  <select
+                  <ScrollableSelect
+                    ariaLabel="Provider"
                     value={provider}
-                    onChange={(e) => setProvider(e.target.value)}
-                    style={fieldStyle(colors)}
+                    onChange={setProvider}
                     disabled={useCustomProvider}
-                  >
-                    {providerOptions.map((p) => (
-                      <option key={p} value={p}>{p}</option>
-                    ))}
-                  </select>
+                    options={providerOptions.map((p) => ({ value: p, label: p }))}
+                  />
                   <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 10, color: colors.textSecondary }}>
                     <input type="checkbox" checked={useCustomProvider} onChange={(e) => setUseCustomProvider(e.target.checked)} />
                     Use custom provider id
@@ -238,18 +239,19 @@ export function OnboardingPanel({
             {step === 3 && (
               <Block title="Gateway Integrations" icon={<Plugs size={13} />} colors={colors}>
                 <div style={{ display: 'grid', gap: 8 }}>
-                  <select
+                  <ScrollableSelect
+                    ariaLabel="Channel"
                     value={selectedGateway}
-                    onChange={(e) => {
-                      setSelectedGateway(e.target.value as 'telegram' | 'discord' | 'whatsapp')
+                    onChange={(v) => {
+                      setSelectedGateway(v as 'telegram' | 'discord' | 'whatsapp')
                       setLinkOutput(null)
                     }}
-                    style={fieldStyle(colors)}
-                  >
-                    <option value="telegram">Telegram</option>
-                    <option value="discord">Discord</option>
-                    <option value="whatsapp">WhatsApp</option>
-                  </select>
+                    options={[
+                      { value: 'telegram', label: 'Telegram' },
+                      { value: 'discord', label: 'Discord' },
+                      { value: 'whatsapp', label: 'WhatsApp' },
+                    ]}
+                  />
 
                   {selectedGateway === 'telegram' && (
                     <>
@@ -306,12 +308,10 @@ export function OnboardingPanel({
             {step === 4 && (
               <Block title="Shortcuts" icon={<Keyboard size={13} />} colors={colors}>
                 <div style={{ display: 'grid', gap: 6 }}>
-                  <ShortcutRow keys="⌥ Space" action="Toggle launcher" colors={colors} />
-                  <ShortcutRow keys="⌘ ⇧ K" action="Toggle launcher fallback" colors={colors} />
-                  <ShortcutRow keys="⌘ ⇧ M" action="Open Community Skills" colors={colors} />
-                  <ShortcutRow keys="⌘ ⇧ A" action="Open Agents Control Center" colors={colors} />
-                  <ShortcutRow keys="⌘ ⇧ S" action="Open Settings Control Center" colors={colors} />
-                  <ShortcutRow keys="⎋" action="Hide window" colors={colors} />
+                  {shortcuts.map((s) => (
+                    <ShortcutRow key={s.id} keys={formatShortcut(s, platform)} action={s.action} colors={colors} />
+                  ))}
+                  <ShortcutRow keys={platform === 'darwin' ? '⎋' : 'Esc'} action="Hide window" colors={colors} />
                 </div>
               </Block>
             )}
