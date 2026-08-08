@@ -25,6 +25,8 @@
 #include <string>
 #include <thread>
 #include <vector>
+#include <functional>
+#include <cstdlib>
 #include <filesystem>
 
 #include <saucer/smartview.hpp>
@@ -34,6 +36,7 @@
 
 #ifdef _WIN32
 #include <windows.h>
+#include <shellapi.h>
 // stable_natives<window> is only forward-declared by the core headers; the
 // backend header is what defines it (and its HWND member).
 #include <saucer/modules/stable/webview2.hpp>
@@ -411,48 +414,131 @@ coco::stray start(saucer::application *app)
         }}.detach();
     };
 
-    // ─── Global shortcuts ───
+    // ─── Taskbar, tray and global shortcuts ───
     //
-    // Electron provided these via globalShortcut.register; saucer has no
-    // equivalent, so register them with Win32 directly. RegisterHotKey delivers
-    // WM_HOTKEY to the registering thread, so this owns a small message loop of
-    // its own rather than trying to hook saucer's.
+    // Electron gave all three for free (skipTaskbar, Tray, globalShortcut);
+    // saucer has none of them, so they are Win32 here.
     //
-    // Accelerators match src/shared/shortcuts.ts: Alt+Space and Ctrl+Shift+K
-    // both toggle the launcher.
-    std::thread{[app, window, summon, dismiss]
+    // WS_EX_TOOLWINDOW is what removes the taskbar button. It also takes the
+    // window out of Alt-Tab, which is what a launcher wants — it is summoned by
+    // hotkey or tray, never by task switching. Applied before the first reveal
+    // so the button never appears at all.
+    {
+        const auto hwnd = window->native().hwnd;
+        const auto ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+        SetWindowLongPtrW(hwnd, GWL_EXSTYLE, (ex | WS_EX_TOOLWINDOW) & ~WS_EX_APPWINDOW);
+        // The style change is not picked up until the frame is recalculated.
+        SetWindowPos(hwnd, nullptr, 0, 0, 0, 0,
+                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+        trace("taskbar button hidden (WS_EX_TOOLWINDOW)");
+    }
+
+    // The tray icon and the hotkeys share one thread and one message loop:
+    // RegisterHotKey delivers WM_HOTKEY to the registering thread, and
+    // Shell_NotifyIcon needs a window to send its callbacks to.
+    std::thread{[summon, dismiss]
                 {
+                    static std::function<void()> do_summon = summon;
+                    static std::function<void()> do_dismiss = dismiss;
+                    static bool on_screen_hint = true;
+
+                    constexpr UINT kTrayMsg = WM_APP + 1;
                     constexpr int kAltSpace = 1;
                     constexpr int kCtrlShiftK = 2;
+                    constexpr UINT kMenuShow = 100;
+                    constexpr UINT kMenuQuit = 101;
 
-                    const bool alt_space = RegisterHotKey(nullptr, kAltSpace, MOD_ALT | MOD_NOREPEAT, VK_SPACE);
-                    const bool ctrl_k = RegisterHotKey(nullptr, kCtrlShiftK,
-                                                       MOD_CONTROL | MOD_SHIFT | MOD_NOREPEAT, 0x4B);
-                    trace(std::string{"hotkeys: Alt+Space="} + (alt_space ? "ok" : "FAILED") +
+                    const auto proc = [](HWND h, UINT msg, WPARAM wp, LPARAM lp) -> LRESULT
+                    {
+                        if (msg == WM_APP + 1)
+                        {
+                            // Left click toggles, right click opens the menu —
+                            // matching the Electron tray's behaviour.
+                            if (LOWORD(lp) == WM_LBUTTONUP)
+                            {
+                                on_screen_hint ? do_dismiss() : do_summon();
+                                on_screen_hint = !on_screen_hint;
+                            }
+                            else if (LOWORD(lp) == WM_RBUTTONUP)
+                            {
+                                auto *menu = CreatePopupMenu();
+                                AppendMenuW(menu, MF_STRING, 100, L"Show OpenClaw UI");
+                                AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+                                AppendMenuW(menu, MF_STRING, 101, L"Quit");
+                                POINT pt{};
+                                GetCursorPos(&pt);
+                                // Required, or the menu will not dismiss when
+                                // the user clicks elsewhere.
+                                SetForegroundWindow(h);
+                                TrackPopupMenu(menu, TPM_RIGHTALIGN | TPM_BOTTOMALIGN, pt.x, pt.y, 0, h, nullptr);
+                                DestroyMenu(menu);
+                            }
+                            return 0;
+                        }
+
+                        if (msg == WM_COMMAND)
+                        {
+                            if (LOWORD(wp) == 100)
+                            {
+                                do_summon();
+                                on_screen_hint = true;
+                            }
+                            else if (LOWORD(wp) == 101)
+                            {
+                                PostQuitMessage(0);
+                                std::exit(0);
+                            }
+                            return 0;
+                        }
+
+                        if (msg == WM_HOTKEY)
+                        {
+                            on_screen_hint ? do_dismiss() : do_summon();
+                            on_screen_hint = !on_screen_hint;
+                            return 0;
+                        }
+
+                        return DefWindowProcW(h, msg, wp, lp);
+                    };
+
+                    WNDCLASSEXW wc{};
+                    wc.cbSize        = sizeof(wc);
+                    wc.lpfnWndProc   = proc;
+                    wc.hInstance     = GetModuleHandleW(nullptr);
+                    wc.lpszClassName = L"OpenClawTrayHost";
+                    RegisterClassExW(&wc);
+
+                    // HWND_MESSAGE: invisible, never in the taskbar, exists only
+                    // to receive tray and hotkey messages.
+                    auto *host = CreateWindowExW(0, wc.lpszClassName, L"", 0, 0, 0, 0, 0, HWND_MESSAGE,
+                                                 nullptr, wc.hInstance, nullptr);
+
+                    NOTIFYICONDATAW nid{};
+                    nid.cbSize           = sizeof(nid);
+                    nid.hWnd             = host;
+                    nid.uID              = 1;
+                    nid.uFlags           = NIF_ICON | NIF_MESSAGE | NIF_TIP;
+                    nid.uCallbackMessage = kTrayMsg;
+                    nid.hIcon            = LoadIconW(nullptr, IDI_APPLICATION);
+                    lstrcpynW(nid.szTip, L"OpenClaw UI", 128);
+                    const auto tray_ok = Shell_NotifyIconW(NIM_ADD, &nid);
+
+                    const bool alt_space = RegisterHotKey(host, kAltSpace, MOD_ALT | MOD_NOREPEAT, VK_SPACE);
+                    const bool ctrl_k = RegisterHotKey(host, kCtrlShiftK, MOD_CONTROL | MOD_SHIFT | MOD_NOREPEAT, 0x4B);
+                    trace(std::string{"tray="} + (tray_ok ? "ok" : "FAILED") +
+                          " hotkeys: Alt+Space=" + (alt_space ? "ok" : "FAILED") +
                           " Ctrl+Shift+K=" + (ctrl_k ? "ok" : "FAILED"));
 
                     MSG msg{};
-                    while (running.load(std::memory_order_relaxed) && GetMessageW(&msg, nullptr, 0, 0))
+                    while (GetMessageW(&msg, nullptr, 0, 0) > 0)
                     {
-                        if (msg.message != WM_HOTKEY)
-                        {
-                            continue;
-                        }
-
-                        trace(std::string{"hotkey toggle; on_screen="} +
-                              (launcher_on_screen.load() ? "1" : "0"));
-                        if (launcher_on_screen.load())
-                        {
-                            dismiss();
-                        }
-                        else
-                        {
-                            summon();
-                        }
+                        TranslateMessage(&msg);
+                        DispatchMessageW(&msg);
                     }
 
-                    UnregisterHotKey(nullptr, kAltSpace);
-                    UnregisterHotKey(nullptr, kCtrlShiftK);
+                    Shell_NotifyIconW(NIM_DELETE, &nid);
+                    UnregisterHotKey(host, kAltSpace);
+                    UnregisterHotKey(host, kCtrlShiftK);
                 }}
         .detach();
 #endif
