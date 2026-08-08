@@ -93,7 +93,11 @@ export function MarketplacePanel() {
     <div
       data-clui-ui
       style={{
-        height: 470,
+        // Flexes to the parent's available height instead of demanding 470px,
+        // which would push the panel off the top of a bottom-anchored window.
+        flex: 1,
+        minHeight: 0,
+        maxHeight: 470,
         display: 'flex',
         flexDirection: 'column',
       }}

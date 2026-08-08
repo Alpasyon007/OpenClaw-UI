@@ -11,8 +11,9 @@ import {
 import { useSessionStore } from '../stores/sessionStore'
 import { PermissionCard } from './PermissionCard'
 import { PermissionDeniedCard } from './PermissionDeniedCard'
-import { useColors, useThemeStore } from '../theme'
+import { useColors, useThemeStore, useBranding } from '../theme'
 import { usePopoverLayer } from './PopoverLayer'
+import { useShortcuts } from '../hooks/useShortcuts'
 import type { Message } from '../../shared/types'
 
 // ─── Constants ───
@@ -77,6 +78,7 @@ export function ConversationView() {
   const isNearBottomRef = useRef(true)
   const prevTabIdRef = useRef(activeTabId)
   const colors = useColors()
+  const branding = useBranding()
   const expandedUI = useThemeStore((s) => s.expandedUI)
   const popoverLayer = usePopoverLayer()
 
@@ -165,7 +167,7 @@ export function ConversationView() {
       const content = format === 'json'
         ? JSON.stringify(base, null, 2)
         : base.map((m) => {
-          const who = m.role === 'assistant' ? 'OpenClaw' : m.role === 'user' ? 'You' : 'System'
+          const who = m.role === 'assistant' ? branding.assistantName : m.role === 'user' ? 'You' : 'System'
           const head = `### ${who}${m.toolName ? ` (${m.toolName}${m.toolStatus ? ` · ${m.toolStatus}` : ''})` : ''}`
           return `${head}\n\n${m.content || '_empty_'}`
         }).join('\n\n')
@@ -183,7 +185,7 @@ export function ConversationView() {
       setSearchToast('Export failed')
       setTimeout(() => setSearchToast(null), 1600)
     }
-  }, [tab])
+  }, [tab, branding])
 
   const updateExportPos = useCallback(() => {
     if (!exportButtonRef.current) return
@@ -346,11 +348,17 @@ export function ConversationView() {
         {popoverLayer && exportOpen && createPortal(
           <div
             ref={exportMenuRef}
+            // The popover layer is pointer-events:none so transparent regions
+            // stay click-through; without opting back in (and without the
+            // data-clui-ui marker the click-through detector looks for) both
+            // menu items were inert — clicks passed straight through them.
+            data-clui-ui
             className="rounded-md p-1 shadow-lg"
             style={{
               position: 'fixed',
               right: exportPos.right,
               top: exportPos.top,
+              pointerEvents: 'auto',
               background: colors.surfacePrimary,
               border: `1px solid ${colors.containerBorder}`,
               zIndex: 1000,
@@ -534,6 +542,9 @@ export function ConversationView() {
 function EmptyState() {
   const setBaseDirectory = useSessionStore((s) => s.setBaseDirectory)
   const colors = useColors()
+  const branding = useBranding()
+  const { format } = useShortcuts()
+  const toggleKeys = format('toggle-launcher')
 
   const handleChooseFolder = async () => {
     const dir = await window.clui.selectDirectory()
@@ -558,10 +569,10 @@ function EmptyState() {
         }}
       >
         <FolderOpen size={13} />
-        Choose folder
+        {branding.greeting}
       </button>
       <span className="text-[11px]" style={{ color: colors.textTertiary }}>
-        Press <strong style={{ color: colors.textSecondary }}>⌥ + Space</strong> to show/hide this overlay
+        Press <strong style={{ color: colors.textSecondary }}>{toggleKeys || '…'}</strong> to show/hide this overlay
       </span>
     </div>
   )

@@ -80,7 +80,11 @@ export function SettingsPopover() {
     setPos({
       bottom: window.innerHeight - rect.top + gap,
       right,
-      maxHeight: undefined,
+      // Collapsed, the menu opens upward — cap it to the space above the
+      // trigger. Leaving this undefined applied neither maxHeight nor
+      // overflowY below, so tall content was clipped off the top of the
+      // window with no way to scroll to it.
+      maxHeight: Math.max(120, rect.top - gap - margin),
     })
   }, [isExpanded])
 

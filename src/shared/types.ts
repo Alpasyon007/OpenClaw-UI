@@ -172,6 +172,8 @@ export interface TabState {
   hasChosenDirectory: boolean
   /** Extra directories accessible via --add-dir (session-preserving) */
   additionalDirs: string[]
+  /** Live gateway connectivity for this tab's last/current run */
+  gatewayState: GatewayConnectionState
 }
 
 export interface Message {
@@ -207,6 +209,73 @@ export type NormalizedEvent =
   | { type: 'rate_limit'; status: string; resetsAt: number; rateLimitType: string }
   | { type: 'usage'; usage: UsageData }
   | { type: 'permission_request'; questionId: string; toolName: string; toolDescription?: string; toolInput?: Record<string, unknown>; options: Array<{ id: string; label: string; kind?: string }> }
+  | { type: 'gateway_state'; state: GatewayConnectionState; detail?: string }
+
+// ─── Gateway Connection ───
+
+/** Live connection state parsed from the CLI's TUI status line. */
+export type GatewayConnectionState = 'connecting' | 'connected' | 'disconnected' | 'unknown'
+
+/**
+ * How a run should reach an agent runtime.
+ *  - `auto`    — let the CLI resolve from its own config (`gateway.mode`)
+ *  - `local`   — force the embedded local agent runtime (`--local`)
+ *  - `gateway` — force an explicit gateway WebSocket URL (`--url` + credential)
+ */
+export type ConnectionMode = 'auto' | 'local' | 'gateway'
+
+export interface ConnectionTarget {
+  mode: ConnectionMode
+  /** WebSocket URL. Required when mode === 'gateway'. */
+  url?: string
+  /**
+   * Shared token. The CLI rejects `--url` without a token or password, so
+   * supplying this forces the credential onto the child's command line where
+   * any local process can read it. Prefer {@link viaConfig}.
+   * Main-process only — never sent to the renderer.
+   */
+  token?: string
+  /** Password auth, an alternative to `token`. Same exposure caveat. */
+  password?: string
+  /**
+   * True when openclaw.json already points at this gateway with a resolvable
+   * credential, so the run needs no connection flags at all and the CLI
+   * resolves both URL and token itself. This is the path that keeps the
+   * credential out of the process table.
+   */
+  viaConfig?: boolean
+}
+
+/** Node host service state, derived from `openclaw node status`. */
+export interface NodeHostStatus {
+  installed: boolean
+  running: boolean
+  pid: number | null
+  /** Friendly name this machine registers under, from ~/.openclaw/node.json */
+  displayName: string | null
+  nodeId: string | null
+  gatewayHost: string | null
+  gatewayPort: number | null
+  tls: boolean
+  /** launchd / systemd / schtasks */
+  serviceKind: string | null
+  /** Sanitized CLI output — credentials stripped before crossing IPC. */
+  raw: string
+}
+
+export type NodeAction = 'install' | 'start' | 'stop' | 'restart' | 'uninstall'
+
+/** Gateway settings as stored in openclaw.json, with credentials never inlined. */
+export interface GatewayConfigView {
+  /** `gateway.mode` — the key the CLI actually reads for remote routing. */
+  mode: 'local' | 'remote' | null
+  remoteUrl: string | null
+  /** Descriptor only — the value is never sent across IPC. */
+  tokenRef: { source: string; id: string } | null
+  /** Whether the referenced credential resolves in this process's environment. */
+  tokenResolvable: boolean
+  configPath: string
+}
 
 // ─── Run Options ───
 
@@ -223,6 +292,8 @@ export interface RunOptions {
   hookSettingsPath?: string
   /** Extra directories to add via --add-dir (session-preserving) */
   addDirs?: string[]
+  /** Which agent runtime this run should reach. Defaults to `auto`. */
+  connection?: ConnectionTarget
 }
 
 // ─── Control Plane Types ───
@@ -370,6 +441,31 @@ export const IPC = {
   OPENCLAW_SET_MODEL: 'clui:openclaw-set-model',
   OPENCLAW_RUN: 'clui:openclaw-run',
   GET_RUNTIME_METRICS: 'clui:get-runtime-metrics',
+
+  // Node host + gateway management
+  NODE_STATUS: 'clui:node-status',
+  NODE_ACTION: 'clui:node-action',
+  GATEWAY_STATUS: 'clui:gateway-status',
+  GATEWAY_PROBE: 'clui:gateway-probe',
+  GATEWAY_CONFIG_GET: 'clui:gateway-config-get',
+  GATEWAY_CONFIG_SET: 'clui:gateway-config-set',
+  GET_CONNECTION_TARGET: 'clui:get-connection-target',
+  SET_CONNECTION_TARGET: 'clui:set-connection-target',
+  GET_SHORTCUTS: 'clui:get-shortcuts',
+
+  // Theming + branding
+  THEME_EXPORT: 'clui:theme-export',
+  THEME_IMPORT: 'clui:theme-import',
+  SET_BRANDING: 'clui:set-branding',
+  TRACE_SHELL: 'clui:trace-shell',
+  /** main -> renderer: settle your DOM, you are about to become visible. */
+  WINDOW_PREPARE: 'clui:window-prepare',
+  /** renderer -> main: prepare pass painted; safe to reveal. */
+  WINDOW_READY: 'clui:window-ready',
+  /** main -> renderer: play your exit, you are about to be parked. */
+  WINDOW_DISMISS: 'clui:window-dismiss',
+  /** renderer -> main: exit finished; safe to park off-screen. */
+  WINDOW_DISMISS_READY: 'clui:window-dismiss-ready',
 
   // Permission mode
   SET_PERMISSION_MODE: 'clui:set-permission-mode',

@@ -1,7 +1,7 @@
 {
   "name": "openclaw-ui",
   "version": "0.1.0",
-  "description": "OpenClaw UI — Desktop Interface for OpenClaw CLI",
+  "description": "OpenClaw UI \u2014 Desktop Interface for OpenClaw CLI",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -23,19 +23,15 @@
     "dist:win": "electron-vite build --mode production && electron-builder --win --dir",
     "doctor": "bash scripts/doctor.sh",
     "setup:git": "bash ./commands/setup-git.command",
-    "postinstall": "electron-builder install-app-deps && node scripts/postinstall.js"
+    "postinstall": "node scripts/postinstall.js"
   },
   "dependencies": {
-    "@phosphor-icons/react": "^2.1.10",
-    "framer-motion": "^12.35.1",
-    "node-pty": "^1.1.0",
-    "react-markdown": "^9.0.0",
-    "remark-gfm": "^4.0.0",
-    "zustand": "^5.0.0"
+    "node-pty": "^1.1.0"
   },
   "build": {
     "appId": "com.openclaw.ui",
     "productName": "OpenClaw UI",
+    "npmRebuild": false,
     "directories": {
       "output": "release"
     },
@@ -44,7 +40,10 @@
       "dist/preload/**/*",
       "dist/renderer/**/*",
       "resources/**/*",
-      "package.json"
+      "package.json",
+      "!node_modules/node-pty/prebuilds/${/*}",
+      "node_modules/node-pty/prebuilds/win32-x64/**",
+      "!node_modules/node-pty/third_party/conpty/*/win10-arm64/**"
     ],
     "mac": {
       "icon": "resources/icon.png",
@@ -63,9 +62,13 @@
           ]
         }
       ]
-    }
+    },
+    "electronLanguages": [
+      "en-US"
+    ]
   },
   "devDependencies": {
+    "@phosphor-icons/react": "^2.1.10",
     "@tailwindcss/vite": "^4.2.1",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
@@ -74,11 +77,15 @@
     "electron": "^35.7.5",
     "electron-builder": "^26.8.1",
     "electron-vite": "^3.0.0",
+    "framer-motion": "^12.35.1",
     "postcss": "^8.4.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
+    "react-markdown": "^9.0.0",
+    "remark-gfm": "^4.0.0",
     "tailwindcss": "^4.2.1",
     "typescript": "^5.7.0",
-    "vite": "^6.0.0"
+    "vite": "^6.0.0",
+    "zustand": "^5.0.0"
   }
 }

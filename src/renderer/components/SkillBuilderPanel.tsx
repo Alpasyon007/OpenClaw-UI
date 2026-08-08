@@ -178,7 +178,7 @@ export function SkillBuilderPanel() {
   }
 
   return (
-    <div data-clui-ui style={{ height: 560, display: 'flex', flexDirection: 'column' }}>
+    <div data-clui-ui style={{ flex: 1, minHeight: 0, maxHeight: 560, display: 'flex', flexDirection: 'column' }}>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '14px 18px', borderBottom: `1px solid ${colors.containerBorder}` }}>
         <div style={{ fontSize: 13, color: colors.textPrimary, fontWeight: 600 }}>Visual Skill Builder</div>
         <div style={{ display: 'flex', gap: 8 }}>

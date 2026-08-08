@@ -17,12 +17,11 @@
 
 import { EventEmitter } from 'events'
 import { homedir } from 'os'
-import { join, basename } from 'path'
-import { execSync } from 'child_process'
+import { join, delimiter, dirname } from 'path'
 import { appendFileSync, chmodSync, existsSync, statSync } from 'fs'
 import type { NormalizedEvent, RunOptions, EnrichedError } from '../../shared/types'
 import { getCliEnv } from '../cli-env'
-import { findCliBinary } from '../openclaw/runtime'
+import { getCliRuntime, type CliRuntime } from '../openclaw/runtime'
 
 // node-pty is a native module — require at runtime to avoid Vite bundling issues
 // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -256,6 +255,81 @@ function isUiChrome(line: string): boolean {
 }
 
 /**
+ * Translate a ConnectionTarget into `openclaw tui` flags.
+ *
+ * The CLI's own rules, which we must not violate:
+ *  - `--local` is mutually exclusive with `--url` / `--token` / `--password`.
+ *  - `--url` is rejected unless `--token` or `--password` accompanies it
+ *    (GatewayExplicitAuthRequiredError), so there is no way to name a URL
+ *    on the command line without also putting a credential there.
+ *
+ * Because a command line is readable by any local process, the preferred path
+ * emits nothing at all: when openclaw.json already targets this gateway with a
+ * resolvable credential, the CLI resolves both itself and the secret never
+ * leaves the config/environment.
+ */
+function buildConnectionArgs(target: import('../../shared/types').ConnectionTarget | undefined): string[] {
+  if (!target || target.mode === 'auto') return []
+
+  if (target.mode === 'local') return ['--local']
+
+  // Config already points here — let the CLI resolve it, keeping the
+  // credential out of argv entirely.
+  if (target.viaConfig) return []
+
+  const args: string[] = []
+  if (target.url) args.push('--url', target.url)
+
+  if (target.token) {
+    args.push('--token', target.token)
+  } else if (target.password) {
+    args.push('--password', target.password)
+  } else if (target.url) {
+    // Emitting a bare --url would be rejected by the CLI with a confusing
+    // error. Fall back to config resolution instead of shipping a broken run.
+    log('Connection target has a URL but no credential — falling back to CLI config resolution')
+    return []
+  }
+
+  if (target.token || target.password) {
+    log('WARNING: emitting an explicit gateway credential on the command line — visible in the process table')
+  }
+
+  return args
+}
+
+/** Mask credential values so the unconditional arg log never leaks a token. */
+function redactArgs(args: string[]): string[] {
+  const secret = new Set(['--token', '--password'])
+  return args.map((arg, i) => (i > 0 && secret.has(args[i - 1]) ? '<redacted>' : arg))
+}
+
+/**
+ * Detect a gateway connectivity transition in the TUI status line.
+ * These lines are otherwise classified as UI chrome and discarded, which is
+ * why an unreachable gateway used to be invisible to the user.
+ */
+function parseGatewayState(
+  line: string,
+): { state: import('../../shared/types').GatewayConnectionState; detail?: string } | null {
+  const cleaned = line.trim()
+  const disconnected = cleaned.match(/gateway\s+disconnected(?:\s*[:|-]\s*(.+))?$/i)
+  if (disconnected) return { state: 'disconnected', detail: disconnected[1]?.trim() }
+  if (/gateway\s+connecting\b/i.test(cleaned)) return { state: 'connecting' }
+  if (/gateway\s+connected\b/i.test(cleaned)) return { state: 'connected' }
+  // The status line is also rendered without the leading "gateway" word,
+  // e.g. "connected | idle". isUiChrome already recognises that variant, so
+  // missing it here would leave gatewayState 'unknown' on a healthy run.
+  if (/^connecting\s*\|/i.test(cleaned)) return { state: 'connecting' }
+  if (/^connected\s*\|/i.test(cleaned)) return { state: 'connected' }
+  // Explicit auth/pairing rejections surface as disconnects with a reason.
+  if (/pairing required|scope upgrade|missing scope/i.test(cleaned)) {
+    return { state: 'disconnected', detail: cleaned }
+  }
+  return null
+}
+
+/**
  * Detect if a line looks like a tool call header from the interactive CLI.
  * Example: "⏳ Bash ls -la" or "✓ Read file.ts"
  */
@@ -325,6 +399,18 @@ export interface PtyRunHandle {
   sawIdleMarker: boolean
   /** Last timestamp where TUI signaled active work */
   lastWorkingSignalAt: number
+  /** Latest gateway connectivity state parsed from the TUI status line */
+  gatewayState: import('../../shared/types').GatewayConnectionState
+  /** Reason text accompanying a disconnect, when the TUI supplied one */
+  gatewayDetail: string | null
+  /**
+   * Which terminal event was emitted. `runCompleteEmitted` alone cannot say,
+   * because it is set on both the success and failure paths — reading it as
+   * "completed" would let the exit handler overwrite a failure with success.
+   */
+  terminalOutcome: 'complete' | 'error' | null
+  /** Connection mode this run was dispatched with, for failure diagnosis */
+  connectionMode: import('../../shared/types').ConnectionMode
 }
 
 // ─── PtyRunManager ───
@@ -332,15 +418,15 @@ export interface PtyRunHandle {
 export class PtyRunManager extends EventEmitter {
   private activeRuns = new Map<string, PtyRunHandle>()
   private _finishedRuns = new Map<string, PtyRunHandle>()
-  private claudeBinary: string
+  private runtime: CliRuntime
   private recentLineSet = new Set<string>()
   private recentLines: string[] = []
 
   constructor() {
     super()
-    this.claudeBinary = findCliBinary()
+    this.runtime = getCliRuntime()
     this._ensureSpawnHelperExecutable()
-    log(`CLI binary: ${this.claudeBinary}`)
+    log(`CLI runtime: ${this.runtime.label} (kind=${this.runtime.kind}, resolved=${this.runtime.resolved})`)
   }
 
   private _rememberLine(line: string): void {
@@ -387,10 +473,10 @@ export class PtyRunManager extends EventEmitter {
   }
 
   private _getEnv(): NodeJS.ProcessEnv {
-    const env = getCliEnv()
-    const binDir = this.claudeBinary.substring(0, this.claudeBinary.lastIndexOf('/'))
-    if (env.PATH && !env.PATH.includes(binDir)) {
-      env.PATH = `${binDir}:${env.PATH}`
+    const env = getCliEnv(this.runtime.extraEnv)
+    const binDir = this.runtime.binDir
+    if (binDir && env.PATH && !env.PATH.split(delimiter).includes(binDir)) {
+      env.PATH = `${binDir}${delimiter}${env.PATH}`
     }
 
     return env
@@ -403,12 +489,17 @@ export class PtyRunManager extends EventEmitter {
 
     const cwd = options.projectPath === '~' ? homedir() : options.projectPath
 
-    const isOpenclaw = basename(this.claudeBinary).includes('openclaw')
-    const args: string[] = []
+    // Authoritative — resolved once at startup. Do not sniff the binary path:
+    // on Windows `command` is the Node executable, not anything named "openclaw".
+    const isOpenclaw = this.runtime.kind === 'openclaw'
+    const args: string[] = [...this.runtime.prefixArgs]
 
     if (isOpenclaw) {
       // OpenClaw does not support Claude-style PTY flags. Use native TUI mode.
-      args.push('tui', '--message', options.prompt, '--session', options.sessionId || 'clui-main')
+      // The session key must be per-tab: a shared key mixes conversations
+      // together once sessions live on a gateway rather than on this machine.
+      args.push('tui', '--message', options.prompt, '--session', options.sessionId || `clui-${requestId}`)
+      args.push(...buildConnectionArgs(options.connection))
     } else {
       // Claude-style interactive mode (no -p flag)
       args.push('--permission-mode', 'default')
@@ -428,10 +519,10 @@ export class PtyRunManager extends EventEmitter {
       args.push(options.prompt)
     }
 
-    log(`Starting PTY run ${requestId}: ${this.claudeBinary} ${args.join(' ')}`)
+    log(`Starting PTY run ${requestId}: ${this.runtime.command} ${redactArgs(args).join(' ')}`)
     log(`Prompt: ${options.prompt.substring(0, 200)}`)
 
-    const ptyProcess = pty.spawn(this.claudeBinary, args, {
+    const ptyProcess = pty.spawn(this.runtime.command, args, {
       name: 'xterm-256color',
       cols: 120,
       rows: 40,
@@ -478,10 +569,14 @@ export class PtyRunManager extends EventEmitter {
       openclawTuiMode: isOpenclaw,
       sawIdleMarker: false,
       lastWorkingSignalAt: Date.now(),
+      gatewayState: 'unknown',
+      gatewayDetail: null,
+      terminalOutcome: null,
+      connectionMode: options.connection?.mode || 'auto',
     }
 
     if (isOpenclaw) {
-      handle.sessionId = options.sessionId || 'clui-main'
+      handle.sessionId = options.sessionId || `clui-${requestId}`
       handle.emittedSessionInit = true
       this.emit('normalized', requestId, {
         type: 'session_init',
@@ -575,19 +670,8 @@ export class PtyRunManager extends EventEmitter {
       // Flush any accumulated text
       this._flushText(requestId, handle, true)
 
-      // Emit task_complete if we haven't already
-      if (!handle.runCompleteEmitted) {
-        handle.runCompleteEmitted = true
-        this.emit('normalized', requestId, {
-          type: 'task_complete',
-          result: '',
-          costUsd: 0,
-          durationMs: Date.now() - handle.startedAt,
-          numTurns: 1,
-          usage: {},
-          sessionId: handle.sessionId || '',
-        } as NormalizedEvent)
-      }
+      // Emit the terminal event if we haven't already
+      this._emitTerminal(requestId, handle)
 
       // Move to finished runs
       this._finishedRuns.set(requestId, handle)
@@ -611,6 +695,20 @@ export class PtyRunManager extends EventEmitter {
 
     // OpenClaw TUI state hints used to avoid premature completion.
     if (handle.openclawTuiMode) {
+      // Read connectivity BEFORE the chrome filter below drops these lines.
+      // Losing them is what made an unreachable gateway look like a success.
+      const gw = parseGatewayState(cleaned)
+      if (gw && gw.state !== handle.gatewayState) {
+        handle.gatewayState = gw.state
+        handle.gatewayDetail = gw.detail || null
+        log(`Gateway state [${requestId}]: ${gw.state}${gw.detail ? ` (${gw.detail})` : ''}`)
+        this.emit('normalized', requestId, {
+          type: 'gateway_state',
+          state: gw.state,
+          detail: gw.detail,
+        } as NormalizedEvent)
+      }
+
       if (/gateway\s+connected\s*\|\s*idle(?:\/exit)?\b/i.test(cleaned)) {
         handle.sawIdleMarker = true
       }
@@ -750,6 +848,58 @@ export class PtyRunManager extends EventEmitter {
     this._scheduleTextFlush(requestId, handle)
   }
 
+  /**
+   * Emit the single terminal event for a run.
+   *
+   * A run that produced no content while the gateway was never reachable is a
+   * failure, not an empty success. Reporting task_complete in that case is
+   * what made connection problems indistinguishable from a silent agent.
+   */
+  private _emitTerminal(requestId: string, handle: PtyRunHandle): void {
+    if (handle.runCompleteEmitted) return
+    handle.runCompleteEmitted = true
+
+    // Only diagnose a gateway problem when this run actually targeted a
+    // gateway and we saw positive evidence of failure. `--local` runs have no
+    // gateway at all, and the TUI's status line has variants that never spell
+    // the word "gateway" — treating either as a failure would blame a gateway
+    // the user deliberately bypassed.
+    const targetedGateway = handle.openclawTuiMode && handle.connectionMode !== 'local'
+    const failed =
+      targetedGateway
+      && !handle.seenContent
+      && (handle.gatewayState === 'disconnected'
+        || (handle.gatewayState === 'unknown' && !handle.sawIdleMarker))
+
+    if (failed) {
+      handle.terminalOutcome = 'error'
+      const detail = handle.gatewayDetail ? ` — ${handle.gatewayDetail}` : ''
+      const reason =
+        handle.gatewayState === 'disconnected'
+          ? `Gateway disconnected${detail}`
+          : `No response from the agent gateway${detail}`
+      log(`Run ${requestId} failed: ${reason}`)
+      this.emit('normalized', requestId, {
+        type: 'error',
+        message: `${reason}. Check the gateway connection in Control Center.`,
+        isError: true,
+        sessionId: handle.sessionId || undefined,
+      } as NormalizedEvent)
+      return
+    }
+
+    handle.terminalOutcome = 'complete'
+    this.emit('normalized', requestId, {
+      type: 'task_complete',
+      result: '',
+      costUsd: 0,
+      durationMs: Date.now() - handle.startedAt,
+      numTurns: 1,
+      usage: {},
+      sessionId: handle.sessionId || '',
+    } as NormalizedEvent)
+  }
+
   private _checkQuiescenceCompletion(requestId: string, handle: PtyRunHandle): void {
     if (!this.activeRuns.has(requestId)) return
     if (!handle.pastInit || handle.permissionPhase === 'waiting_user') return
@@ -796,18 +946,7 @@ export class PtyRunManager extends EventEmitter {
     }
 
     this._flushText(requestId, handle, true)
-    if (!handle.runCompleteEmitted) {
-      handle.runCompleteEmitted = true
-      this.emit('normalized', requestId, {
-        type: 'task_complete',
-        result: '',
-        costUsd: 0,
-        durationMs: Date.now() - handle.startedAt,
-        numTurns: 1,
-        usage: {},
-        sessionId: handle.sessionId || '',
-      } as NormalizedEvent)
-    }
+    this._emitTerminal(requestId, handle)
 
     try { handle.pty.write('/exit\n') } catch {}
     setTimeout(() => {
@@ -852,6 +991,14 @@ export class PtyRunManager extends EventEmitter {
    * Check the current buffer for permission prompt patterns.
    */
   private _checkPermissionInBuffer(requestId: string, handle: PtyRunHandle, currentLine: string): void {
+    // The detector below scores on Claude Code's Ink strings ("Claude wants to
+    // use", "❯ Allow"), which the OpenClaw TUI never emits. Running it there
+    // produces only false positives — and a false positive makes
+    // respondToPermission() type Enter into the agent's message box.
+    // Gateway-side approvals (exec.approval.*) are the correct mechanism and
+    // are not reachable over this transport.
+    if (handle.openclawTuiMode) return
+
     // Add current line to detection context
     const detectionWindow = [...handle.ptyBuffer.slice(-10), currentLine]
 
@@ -915,6 +1062,13 @@ export class PtyRunManager extends EventEmitter {
     const handle = this.activeRuns.get(requestId)
     if (!handle) {
       log(`respondToPermission: no active run for ${requestId}`)
+      return false
+    }
+
+    // Never write raw keystrokes into an OpenClaw TUI. It has no Ink selector
+    // to drive, so anything we send lands in the message box instead.
+    if (handle.openclawTuiMode) {
+      log(`respondToPermission: refusing to write keystrokes in OpenClaw TUI mode (${requestId})`)
       return false
     }
 
