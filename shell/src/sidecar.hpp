@@ -60,6 +60,8 @@ namespace shell
     {
         m_on_line = std::move(on_line);
 
+        const auto log_path = std::wstring{script.begin(), script.end()} + L".log";
+
         SECURITY_ATTRIBUTES sa{.nLength = sizeof(SECURITY_ATTRIBUTES), .bInheritHandle = TRUE};
 
         HANDLE in_read{}, in_write{}, out_read{}, out_write{};
@@ -79,9 +81,13 @@ namespace shell
         si.dwFlags    = STARTF_USESTDHANDLES;
         si.hStdInput  = in_read;
         si.hStdOutput = out_write;
-        // Leave stderr attached to ours so sidecar diagnostics stay visible and
-        // cannot contaminate the protocol stream.
-        si.hStdError  = GetStdHandle(STD_ERROR_HANDLE);
+        // The sidecar logs to stderr, which goes nowhere in a GUI-subsystem app.
+        // Send it to a file next to the executable so its diagnostics survive.
+        // Never to stdout, which carries the protocol.
+        SECURITY_ATTRIBUTES log_sa{.nLength = sizeof(SECURITY_ATTRIBUTES), .bInheritHandle = TRUE};
+        auto *log_file = CreateFileW(log_path.c_str(), FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                                     &log_sa, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+        si.hStdError = log_file != INVALID_HANDLE_VALUE ? log_file : GetStdHandle(STD_ERROR_HANDLE);
 
         // lpApplicationName is null so PATH is searched for node.exe.
         auto command = std::wstring{L"node \""} + std::wstring{script.begin(), script.end()} + L"\"";

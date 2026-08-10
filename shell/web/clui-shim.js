@@ -77,8 +77,12 @@
     if (!msg) return;
 
     if (msg.event) {
+      // Positional args come over the wire. They are never inferred from an
+      // object's shape, which shredded single-object handlers such as
+      // onSkillStatus(status) into one argument per key.
+      var args = Array.isArray(msg.args) ? msg.args : (msg.payload === undefined ? [] : [msg.payload]);
       var set = listeners.get(msg.event);
-      if (set) set.forEach(function (fn) { try { fn(msg.payload); } catch (e) { console.error(e); } });
+      if (set) set.forEach(function (fn) { try { fn.apply(null, args); } catch (e) { console.error(e); } });
       return;
     }
 
@@ -150,69 +154,15 @@
     dismissReady: function (generation) { fire("clui:window-dismiss-ready", generation); },
     setDragHolding: function (holding) { fire("clui:drag-holding", holding); },
 
-    onThemeChange: function (callback) { return on("clui:theme-changed", function (p) {
-      if (p && typeof p === 'object' && !Array.isArray(p)) {
-        var keys = Object.keys(p);
-        return callback.apply(null, keys.map(function (k) { return p[k]; }));
-      }
-      return callback(p);
-    }); },
-    onEvent: function (callback) { return on("clui:normalized-event", function (p) {
-      if (p && typeof p === 'object' && !Array.isArray(p)) {
-        var keys = Object.keys(p);
-        return callback.apply(null, keys.map(function (k) { return p[k]; }));
-      }
-      return callback(p);
-    }); },
-    onTabStatusChange: function (callback) { return on("clui:tab-status-change", function (p) {
-      if (p && typeof p === 'object' && !Array.isArray(p)) {
-        var keys = Object.keys(p);
-        return callback.apply(null, keys.map(function (k) { return p[k]; }));
-      }
-      return callback(p);
-    }); },
-    onError: function (callback) { return on("clui:enriched-error", function (p) {
-      if (p && typeof p === 'object' && !Array.isArray(p)) {
-        var keys = Object.keys(p);
-        return callback.apply(null, keys.map(function (k) { return p[k]; }));
-      }
-      return callback(p);
-    }); },
-    onSkillStatus: function (callback) { return on("clui:skill-status", function (p) {
-      if (p && typeof p === 'object' && !Array.isArray(p)) {
-        var keys = Object.keys(p);
-        return callback.apply(null, keys.map(function (k) { return p[k]; }));
-      }
-      return callback(p);
-    }); },
-    onWindowShown: function (callback) { return on("clui:window-shown", function (p) {
-      if (p && typeof p === 'object' && !Array.isArray(p)) {
-        var keys = Object.keys(p);
-        return callback.apply(null, keys.map(function (k) { return p[k]; }));
-      }
-      return callback(p);
-    }); },
-    onWindowPrepare: function (callback) { return on("clui:window-prepare", function (p) {
-      if (p && typeof p === 'object' && !Array.isArray(p)) {
-        var keys = Object.keys(p);
-        return callback.apply(null, keys.map(function (k) { return p[k]; }));
-      }
-      return callback(p);
-    }); },
-    onWindowDismiss: function (callback) { return on("clui:window-dismiss", function (p) {
-      if (p && typeof p === 'object' && !Array.isArray(p)) {
-        var keys = Object.keys(p);
-        return callback.apply(null, keys.map(function (k) { return p[k]; }));
-      }
-      return callback(p);
-    }); },
-    onShortcutAction: function (callback) { return on("clui:shortcut-action", function (p) {
-      if (p && typeof p === 'object' && !Array.isArray(p)) {
-        var keys = Object.keys(p);
-        return callback.apply(null, keys.map(function (k) { return p[k]; }));
-      }
-      return callback(p);
-    }); },
+    onThemeChange: function (callback) { return on("clui:theme-changed", callback); },
+    onEvent: function (callback) { return on("clui:normalized-event", callback); },
+    onTabStatusChange: function (callback) { return on("clui:tab-status-change", callback); },
+    onError: function (callback) { return on("clui:enriched-error", callback); },
+    onSkillStatus: function (callback) { return on("clui:skill-status", callback); },
+    onWindowShown: function (callback) { return on("clui:window-shown", callback); },
+    onWindowPrepare: function (callback) { return on("clui:window-prepare", callback); },
+    onWindowDismiss: function (callback) { return on("clui:window-dismiss", callback); },
+    onShortcutAction: function (callback) { return on("clui:shortcut-action", callback); },
   };
 
   // ─── Click-through hit regions ───

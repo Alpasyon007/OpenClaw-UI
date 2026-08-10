@@ -377,7 +377,10 @@ coco::stray start(saucer::application *app)
     {
         app->post([evp, channel = std::move(channel), payload_json = std::move(payload_json)]
                   {
-                      const auto json = "{\"event\":\"" + channel + "\",\"payload\":" + payload_json + "}";
+                      // Same envelope the sidecar uses: an explicit positional
+                      // argument list, so the page never has to infer one.
+                      const auto json =
+                          "{\"event\":\"" + channel + "\",\"args\":[" + payload_json + "]}";
                       evp->execute("window.__bridgeReceive({})", json);
                   });
     };
@@ -389,7 +392,9 @@ coco::stray start(saucer::application *app)
         if (!present_gen.compare_exchange_strong(expected, 0)) return;
         if (launcher_on_screen.exchange(true)) return;
         app->post([window] { window->set_position(on_screen_pos); window->focus(); });
-        send_event("clui:window-shown", "null");
+        // onWindowShown takes no arguments, so the list is empty rather than
+        // carrying a null the handler would receive as a parameter.
+        send_event("clui:window-shown", "");
         trace("reveal gen=" + std::to_string(gen));
     };
 

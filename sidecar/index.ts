@@ -40,8 +40,14 @@ function send(msg: unknown) {
   process.stdout.write(JSON.stringify(msg) + '\n')
 }
 
-function emit(event: string, payload?: unknown) {
-  send({ event, payload })
+// Events carry an explicit positional argument list.
+//
+// The shim used to infer arguments from a payload object's key order, which
+// works for {tabId, event} by luck but shreds any handler taking a single
+// object — onSkillStatus(status) received status.a, status.b, ... as separate
+// arguments. That is what put tab ids and status strings into the transcript.
+function emit(event: string, ...args: unknown[]) {
+  send({ event, args })
 }
 
 // ─── Static server ───
@@ -117,14 +123,20 @@ const controlPlane = new ControlPlane(INTERACTIVE_PTY)
 
 // ControlPlane is an EventEmitter. These three forwards replace the broadcast()
 // calls at src/main/index.ts:597-607 and carry the CLI event stream.
+const promptSeen = new Map<string, number>()
+let eventCount = 0
+
 controlPlane.on('event', (tabId: string, event: unknown) => {
-  emit('clui:normalized-event', { tabId, event })
+  eventCount++
+  const kind = (event as any)?.type ?? 'unknown'
+  log(`EVENT #${eventCount} tab=${String(tabId).slice(0, 8)} type=${kind}`)
+  emit('clui:normalized-event', tabId, event)
 })
 controlPlane.on('tab-status-change', (tabId: string, newStatus: string, oldStatus: string) => {
-  emit('clui:tab-status-change', { tabId, newStatus, oldStatus })
+  emit('clui:tab-status-change', tabId, newStatus, oldStatus)
 })
 controlPlane.on('error', (tabId: string, error: unknown) => {
-  emit('clui:enriched-error', { tabId, error })
+  emit('clui:enriched-error', tabId, error)
 })
 
 type OpenclawConfig = {
@@ -418,6 +430,10 @@ const handlers: Record<string, (args: any) => unknown | Promise<unknown>> = {
 
   // ── Prompts, PTY and the CLI event stream: the reason this process exists ──
   [IPC.PROMPT]: async ({ tabId, requestId, options }: any) => {
+    // Duplicate submissions show up as a duplicated transcript and as the CLI
+    // reporting the session file changed underneath it, so make them visible.
+    promptSeen.set(requestId, (promptSeen.get(requestId) ?? 0) + 1)
+    log(`PROMPT tab=${String(tabId).slice(0, 8)} req=${String(requestId).slice(0, 8)} submission#${promptSeen.get(requestId)}`)
     if (!tabId) throw new Error('No tabId provided — prompt rejected')
     if (!requestId) throw new Error('No requestId provided — prompt rejected')
     await controlPlane.submitPrompt(tabId, requestId, options)
@@ -791,5 +807,5 @@ void (async () => {
   const wired = Object.keys(handlers).filter((k) => all.includes(k)).length
   log(`ready on node ${process.version}; ${wired}/${all.length} channels wired`)
   // The shell waits for this before navigating, so the server is guaranteed up.
-  emit('sidecar:ready', { nodeVersion: process.version, wired, total: all.length, webPort: WEB_PORT })
+  emit('sidecar:ready', { nodeVersion: process.version, wired, total: all.length, webPort: WEB_PORT })  // single object arg, now safe
 }
