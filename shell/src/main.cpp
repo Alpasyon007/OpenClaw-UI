@@ -221,7 +221,7 @@ coco::stray start(saucer::application *app)
                  });
 
     {
-        const auto script = (exe_dir() / "sidecar" / "main.mjs").string();
+        const auto script = (exe_dir() / "sidecar" / "main.cjs").string();
         std::string err;
 
         // The sidecar serves the page from here; keep the two in agreement.

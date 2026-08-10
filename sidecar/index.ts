@@ -780,7 +780,11 @@ createInterface({ input: process.stdin })
     process.exit(0)
   })
 
-await startWebServer()
+// Wrapped rather than top-level await: the bundle is CJS so that require()
+// works for node-pty, and CJS has no top-level await.
+void (async () => {
+  await startWebServer()
+})()
 
 {
   const all = Object.values(IPC) as string[]

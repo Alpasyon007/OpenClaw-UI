@@ -34,9 +34,15 @@ run('node', ['sidecar/gen-shim.mjs', 'src/preload/index.ts', 'src/shared/types.t
 run('node', ['--check', 'shell/web/clui-shim.js'])
 
 console.log('\n[4/5] sidecar bundle')
+// Emitted as CommonJS, not ESM, and this matters: node-pty is a native module
+// that stays external, and pty-run-manager loads it with require(). ESM has no
+// require, so esbuild substitutes a shim that throws "Dynamic require of ...",
+// which pty-run-manager catches and reports as "node-pty is not available".
+// CJS gives a real require and the module loads. A .cjs extension is required
+// because .mjs would force ESM regardless of the format flag.
 run('npx', ['--no-install', 'esbuild', 'sidecar/index.ts', '--bundle', '--platform=node',
-  '--format=esm', '--target=node22', '--external:node-pty', '--minify',
-  '--outfile=shell/sidecar/main.mjs'])
+  '--format=cjs', '--target=node22', '--external:node-pty', '--minify',
+  '--outfile=shell/sidecar/main.cjs'])
 
 console.log('\n[5/5] shell (C++, Release)')
 run('cmake', ['--build', 'build', '--config', 'Release'], join(root, 'shell'))
