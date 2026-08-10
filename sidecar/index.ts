@@ -759,6 +759,48 @@ const handlers: Record<string, (args: any) => unknown | Promise<unknown>> = {
   },
 }
 
+
+/**
+ * Channels whose preload payload is a bare value rather than an object.
+ *
+ * `initSession: (tabId) => ipcRenderer.send(IPC.INIT_SESSION, tabId)` puts a
+ * plain string on the wire, so a handler destructuring `{ tabId }` from it gets
+ * undefined. PROMPT worked only because its payload happens to be an object,
+ * which is why prompts submitted but the session was never initialised and the
+ * run produced no events at all.
+ *
+ * Normalising here keeps every handler written against a named field.
+ */
+const BARE_ARG: Record<string, string> = {
+  [IPC.CANCEL]: 'requestId',
+  [IPC.STOP_TAB]: 'tabId',
+  [IPC.CLOSE_TAB]: 'tabId',
+  [IPC.TAB_HEALTH]: 'tabId',
+  [IPC.INIT_SESSION]: 'tabId',
+  [IPC.RESET_TAB_SESSION]: 'tabId',
+  [IPC.SET_PERMISSION_MODE]: 'mode',
+  [IPC.OPEN_EXTERNAL]: 'url',
+  [IPC.OPEN_PATH]: 'path',
+  [IPC.PASTE_IMAGE]: 'dataUrl',
+  [IPC.TRANSCRIBE_AUDIO]: 'audioBase64',
+  [IPC.LIST_SESSIONS]: 'projectPath',
+  [IPC.RESIZE_HEIGHT]: 'height',
+  [IPC.SET_WINDOW_WIDTH]: 'width',
+  [IPC.DRAG_HOLDING]: 'holding',
+  [IPC.TRACE_SHELL]: 'line',
+  [IPC.SET_BRANDING]: 'branding',
+}
+
+/** Give every handler an object, whatever shape arrived on the wire. */
+function normalizeArgs(channel: string, args: unknown): any {
+  if (args !== null && typeof args === 'object') return args
+  const key = BARE_ARG[channel]
+  if (key) return { [key]: args }
+  // SET_CONNECTION_TARGET and friends already send an object; anything else
+  // bare and unmapped is passed through so the handler can decide.
+  return args ?? {}
+}
+
 // ─── Dispatch ───
 
 createInterface({ input: process.stdin })
@@ -781,7 +823,7 @@ createInterface({ input: process.stdin })
     }
 
     try {
-      send({ id: req.id, ok: true, result: await handler(req.args ?? {}) })
+      send({ id: req.id, ok: true, result: await handler(normalizeArgs(req.channel, req.args)) })
     } catch (err: any) {
       send({ id: req.id, ok: false, error: String(err?.message ?? err) })
     }
