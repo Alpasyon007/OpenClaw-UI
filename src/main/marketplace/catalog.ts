@@ -1,4 +1,3 @@
-import { net } from 'electron'
 import { execFile } from 'child_process'
 import { readFile, readdir, mkdir, writeFile, rm } from 'fs/promises'
 import { join, resolve } from 'path'
@@ -377,23 +376,16 @@ export async function uninstallPlugin(
 
 // ─── Helpers ───
 
-function netFetch(url: string): Promise<{ ok: boolean; status: number; body: string }> {
-  return new Promise((resolve, reject) => {
-    const request = net.request(url)
-    request.on('response', (response) => {
-      let body = ''
-      response.on('data', (chunk) => { body += chunk.toString() })
-      response.on('end', () => {
-        resolve({
-          ok: response.statusCode >= 200 && response.statusCode < 300,
-          status: response.statusCode,
-          body,
-        })
-      })
-    })
-    request.on('error', (err) => reject(err))
-    request.end()
-  })
+/**
+ * Node's global fetch, replacing Electron's net.request.
+ *
+ * This was the only Electron dependency in the module, which is what let the
+ * whole marketplace move into the sidecar unchanged. Same shape as before so
+ * no caller needed touching.
+ */
+async function netFetch(url: string): Promise<{ ok: boolean; status: number; body: string }> {
+  const response = await fetch(url)
+  return { ok: response.ok, status: response.status, body: await response.text() }
 }
 
 async function fetchAwesomeOpenclawSkills(): Promise<CatalogPlugin[]> {
