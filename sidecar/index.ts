@@ -12,7 +12,7 @@
 
 import { createServer } from 'node:http'
 import { readFile } from 'node:fs/promises'
-import { appendFileSync, readFileSync as readFileSyncNode } from 'node:fs'
+import { appendFileSync, readFileSync as readFileSyncNode, statSync as statSyncNode } from 'node:fs'
 import { extname, join, normalize, sep } from 'node:path'
 import { homedir } from 'node:os'
 import { execFile, execFileSync } from 'node:child_process'
@@ -29,6 +29,7 @@ import { ControlPlane } from '../src/main/claude/control-plane'
 import { getCliRuntime, getAgentDataHomes, cliInvocation } from '../src/main/openclaw/runtime'
 import { getCliEnv } from '../src/main/cli-env'
 import { fetchCatalog, listInstalled, installPlugin, uninstallPlugin } from '../src/main/marketplace/catalog'
+import { runCliAsync, probe, peekProbe, invalidateProbe, flushProbeCache } from '../src/main/cli-probe'
 
 const log = (...a: unknown[]) => console.error('[sidecar]', ...a)
 
@@ -147,10 +148,26 @@ type OpenclawConfig = {
   }
 }
 
-/** Read ~/.openclaw/openclaw.json. Never throws; a missing file is just {}. */
+/**
+ * Read ~/.openclaw/openclaw.json. Never throws; a missing file is just {}.
+ *
+ * Memoised on mtime+size. isRemoteGatewayMode() and resolveGatewayToken() both
+ * call this, and both sit on paths that run per gateway RPC and per status
+ * poll — so the naive version re-read and re-parsed the file dozens of times a
+ * minute. statSync is cheap next to a read plus a parse, and keying on mtime
+ * means an edit by the CLI is still picked up on the next call.
+ */
+let configCache: { key: string; value: OpenclawConfig } | null = null
 function readOpenclawConfig(): OpenclawConfig {
+  const path = join(homedir(), '.openclaw', 'openclaw.json')
   try {
-    return JSON.parse(readFileSyncNode(join(homedir(), '.openclaw', 'openclaw.json'), 'utf-8'))
+    const st = statSyncNode(path)
+    const key = `${st.mtimeMs}:${st.size}`
+    if (configCache && configCache.key === key) return configCache.value
+
+    const value = JSON.parse(readFileSyncNode(path, 'utf-8')) as OpenclawConfig
+    configCache = { key, value }
+    return value
   } catch {
     return {}
   }
@@ -179,17 +196,28 @@ function redactSecrets(text: string): string {
  * the registry is the only place to find it. This is why the probe could not
  * authenticate: the credential existed but was invisible to us.
  */
+const winUserEnvCache = new Map<string, string | null>()
 function readWindowsUserEnv(name: string): string | null {
   if (process.platform !== 'win32') return null
+  // Memoised: resolveGatewayToken() runs on every gateway status, probe and
+  // RPC, and this is a synchronous spawn that blocks the protocol stream.
+  // A variable set with setx after we started is not going to appear mid-run.
+  if (winUserEnvCache.has(name)) return winUserEnvCache.get(name) ?? null
+
+  let value: string | null = null
   try {
     const out = execFileSync('reg', ['query', 'HKCU\\Environment', '/v', name], {
       encoding: 'utf-8',
+      timeout: 5000,
       stdio: ['ignore', 'pipe', 'ignore'],
     })
-    return out.match(/REG_(?:EXPAND_)?SZ\s+(.+)/)?.[1]?.trim() || null
+    value = out.match(/REG_(?:EXPAND_)?SZ\s+(.+)/)?.[1]?.trim() || null
   } catch {
-    return null
+    // Not set, or reg.exe unavailable.
   }
+
+  winUserEnvCache.set(name, value)
+  return value
 }
 
 /**
@@ -212,25 +240,6 @@ function resolveGatewayToken(): string | null {
     }
   }
   return null
-}
-
-/** Async CLI call. The sync variant would block the whole sidecar for 45s. */
-function runCliAsync(args: string[], timeoutMs = 20000, extraEnv: NodeJS.ProcessEnv = {}) {
-  const { command, args: full } = cliInvocation(args)
-  return new Promise<{ ok: boolean; stdout: string; stderr: string }>((resolve) => {
-    execFile(
-      command,
-      full,
-      {
-        encoding: 'utf-8',
-        timeout: timeoutMs,
-        env: getCliEnv({ ...getCliRuntime().extraEnv, ...extraEnv }),
-        maxBuffer: 8 * 1024 * 1024,
-      },
-      (err: any, stdout: string, stderr: string) =>
-        resolve({ ok: !err, stdout: String(stdout || '').trim(), stderr: String(stderr || err?.message || '').trim() }),
-    )
-  })
 }
 
 
@@ -357,22 +366,23 @@ function openWith(command: string, args: string[]) {
   })
 }
 
-/** Synchronous CLI call, as runCliSync did in the Electron main process. */
-function runCli(args: string[], timeoutMs = 5000) {
-  const { command, args: full } = cliInvocation(args)
-  try {
-    const stdout = String(
-      execFileSync(command, full, {
-        encoding: 'utf-8',
-        timeout: timeoutMs,
-        env: getCliEnv(getCliRuntime().extraEnv),
-        stdio: ['ignore', 'pipe', 'pipe'],
-      }),
-    ).trim()
-    return { ok: true, stdout }
-  } catch (err: any) {
-    return { ok: false, stdout: String(err?.stdout ?? '').trim() }
-  }
+/**
+ * Run the CLI.
+ *
+ * This was `execFileSync`, inherited from the Electron main process where it
+ * was already wrong. In the sidecar it is worse: stdout carries the entire
+ * protocol, so blocking the event loop blocks every channel at once — an
+ * `onboard` call with its 60s budget froze the whole app, not just its own
+ * request. Nothing here may spawn synchronously.
+ *
+ * runCliAsync also throttles: at most two CLI processes run at a time and each
+ * is dropped below normal priority. A single `openclaw` invocation parses a
+ * ~90MB module graph before doing any work, so an unbounded fan-out of them is
+ * what made launching lag the whole machine.
+ */
+async function runCli(args: string[], timeoutMs = 20000) {
+  const res = await runCliAsync(args, timeoutMs)
+  return { ok: res.ok, stdout: res.stdout, stderr: res.stderr }
 }
 
 // ─── Channel table ───
@@ -381,40 +391,196 @@ function runCli(args: string[], timeoutMs = 5000) {
 // shim needs no name translation. Anything absent fails loudly rather than
 // resolving to undefined — an unwired channel should be obvious, not silent.
 
+// ─── Boot facts ───
+
+/** The part of START that costs a CLI spawn to learn. */
+type StartFacts = {
+  version: string
+  auth: { email?: string; subscriptionType?: string; authMethod?: string }
+  mcpServers: string[]
+  authSupported: boolean
+  mcpSupported: boolean
+}
+
+const START_KEY = 'start-facts'
+const UNKNOWN_START: StartFacts = {
+  version: 'unknown',
+  auth: {},
+  mcpServers: [],
+  authSupported: true,
+  mcpSupported: true,
+}
+
+/** Version and auth are fixed for the lifetime of an install. */
+const START_TTL_MS = 30 * 60_000
+/** Node host service state changes only when the user acts on it. */
+const NODE_STATUS_TTL_MS = 60_000
+/** Local gateway service state. */
+const GATEWAY_STATUS_TTL_MS = 60_000
+/**
+ * Gateway reachability. Short on purpose: this is reached by the "Test
+ * Connection" button, and a button that says it is testing must actually test.
+ * The window only collapses a burst of clicks onto one invocation.
+ */
+const GATEWAY_PROBE_TTL_MS = 5_000
+
+/**
+ * True when the CLI is telling us the subcommand does not exist.
+ *
+ * Worth matching precisely: a missing subcommand means "hide this part of the
+ * UI", while a genuine failure means "show it, but report the error". The
+ * pattern used to check only for "unknown command"/"did you mean", which this
+ * CLI never says — it answers `OpenClaw does not know the command "auth"`, so
+ * the auth row stayed visible and permanently blank on every install where the
+ * subcommand is absent.
+ */
+function isUnknownCommand(res: { stdout: string; stderr: string }): boolean {
+  return /unknown command|did you mean|does not know the command|is not a known command/i.test(
+    `${res.stdout}\n${res.stderr}`,
+  )
+}
+
+async function collectStartFacts(): Promise<StartFacts> {
+  // Concurrent, not sequential. `-v` answers in ~90ms while `auth status` and
+  // `mcp list` each load the CLI's whole module graph; running them in series
+  // cost ~11s for nothing. The throttle caps how many actually overlap.
+  const [short, authProbe, mcpProbe] = await Promise.all([
+    runCli(['-v'], 15000),
+    runCli(['auth', 'status'], 20000),
+    runCli(['mcp', 'list'], 20000),
+  ])
+
+  let version = short.ok && short.stdout ? short.stdout : ''
+  if (!version) {
+    const long = await runCli(['--version'], 15000)
+    if (long.ok && long.stdout) version = long.stdout
+  }
+
+  let auth: StartFacts['auth'] = {}
+  let authSupported = !isUnknownCommand(authProbe)
+  if (authProbe.ok && authSupported) {
+    try {
+      auth = JSON.parse(authProbe.stdout)
+    } catch {
+      // non-JSON output just means no email to show
+    }
+  }
+
+  // `mcp list` reports "none configured" as a prose sentence on success, which
+  // is not a server list. Only lines that look like entries count.
+  const mcpSupported = !isUnknownCommand(mcpProbe)
+  const mcpServers =
+    mcpProbe.ok && mcpSupported && !/^No OpenClaw-managed MCP servers/i.test(mcpProbe.stdout)
+      ? mcpProbe.stdout.split('\n').map((l) => l.trim()).filter(Boolean)
+      : []
+
+  return { version: version || 'unknown', auth, mcpServers, authSupported, mcpSupported }
+}
+
+/**
+ * Shape this exactly as CluiAPI.start() declares it.
+ *
+ * The sidecar used to return a flat `email` and no projectPath, cliBinary or
+ * mcp fields, while the renderer reads `result.auth?.email` and the rest — so
+ * the account row and the CLI label were permanently blank. The contract is
+ * the source of truth for this payload; anything it declares gets answered.
+ */
+function buildStartPayload(facts: StartFacts) {
+  const runtime = getCliRuntime()
+  return {
+    version: facts.version,
+    auth: facts.auth,
+    mcpServers: facts.mcpServers,
+    projectPath: process.cwd(),
+    homePath: homedir(),
+    cliBinary: runtime.label,
+    cliCommand: runtime.kind,
+    authSupported: facts.authSupported,
+    mcpSupported: facts.mcpSupported,
+  }
+}
+
+// ─── Node host + gateway readers ───
+//
+// Split out of the channel table so each can be handed to probe() as a plain
+// producer, and so the cache key is the only thing deciding when they run.
+
+async function readNodeStatus(): Promise<NodeHostStatus> {
+  const r = await runCli(['node', 'status'], 20000)
+  const text = r.stdout
+
+  const grab = (re: RegExp) => text.match(re)?.[1]?.trim() ?? null
+  const command = grab(/^Command:\s*(.+)$/m) ?? ''
+  const runtime = grab(/^Runtime:\s*(.+)$/m) ?? ''
+
+  return {
+    installed: /registered/i.test(grab(/^Service:\s*(.+)$/m) ?? ''),
+    running: /\brunning\b/i.test(runtime),
+    pid: Number(runtime.match(/pid\s+(\d+)/i)?.[1]) || null,
+    displayName: grab(/^Name:\s*(.+)$/m),
+    nodeId: grab(/^Node ID:\s*(.+)$/m),
+    gatewayHost: command.match(/--host\s+(\S+)/)?.[1] ?? null,
+    gatewayPort: Number(command.match(/--port\s+(\d+)/)?.[1]) || null,
+    tls: /--tls\b/.test(command),
+    serviceKind: grab(/^Service:\s*(.+)$/m),
+    // The type requires credentials stripped before this crosses IPC.
+    raw: redactSecrets(text),
+  }
+}
+
+async function readGatewayStatus() {
+  const token = resolveGatewayToken()
+  const res = await runCliAsync(['gateway', 'status'], 30000, token ? { OPENCLAW_GATEWAY_TOKEN: token } : {})
+  const text = `${res.stdout}\n${res.stderr}`.trim()
+  return {
+    ok: res.ok,
+    running: /Runtime:\s*running/i.test(text),
+    installed: !/Service unit not found|Service not installed/i.test(text),
+    output: redactSecrets(text),
+  }
+}
+
+// The probe must carry the credential or the gateway answers unreachable —
+// which is exactly what the Control Center was reporting.
+async function readGatewayProbe() {
+  const token = resolveGatewayToken()
+  const res = await runCliAsync(['gateway', 'probe'], 45000, token ? { OPENCLAW_GATEWAY_TOKEN: token } : {})
+  const text = `${res.stdout}\n${res.stderr}`.trim()
+  return {
+    ok: res.ok,
+    reachable: /Reachable:\s*yes/i.test(text),
+    capability: text.match(/Capability:\s*([^\n·]+)/i)?.[1]?.trim() || null,
+    // The gateway rejects operator calls until the credential carries
+    // operator scope; surface that rather than a generic failure.
+    missingOperatorScope: /missing scope:\s*operator/i.test(text),
+    output: redactSecrets(text),
+  }
+}
+
 const handlers: Record<string, (args: any) => unknown | Promise<unknown>> = {
   // ── Boot path ──
-  [IPC.START]: () => {
-    const runtime = getCliRuntime()
+  //
+  // Answers from cache so the first frame is not waiting on the CLI. A
+  // first-ever launch gets placeholders and a second payload over START_INFO
+  // once the probes land; every later launch reads the persisted values.
+  [IPC.START]: async () => {
+    const cached = peekProbe<StartFacts>(START_KEY)
 
-    let version = 'unknown'
-    const short = runCli(['-v'])
-    if (short.ok && short.stdout) version = short.stdout
-    else {
-      const long = runCli(['--version'])
-      if (long.ok && long.stdout) version = long.stdout
+    if (!cached) {
+      void probe(START_KEY, collectStartFacts, { ttlMs: START_TTL_MS, persist: true })
+        .then((facts) => emit(IPC.START_INFO, buildStartPayload(facts)))
+        .catch((err) => log('START probe failed:', err?.message))
+      return buildStartPayload(UNKNOWN_START)
     }
 
-    let auth: { email?: string } = {}
-    let authSupported = true
-    const probe = runCli(['auth', 'status'])
-    if (probe.ok) {
-      try {
-        auth = JSON.parse(probe.stdout)
-      } catch {
-        // non-JSON output just means no email to show
-      }
-    } else {
-      authSupported = false
-    }
-
-    return {
-      cliCommand: runtime.kind,
-      version,
-      homePath: homedir(),
-      email: auth.email ?? null,
-      authSupported,
-      agentDataHomes: getAgentDataHomes(),
-    }
+    return buildStartPayload(
+      await probe(START_KEY, collectStartFacts, {
+        ttlMs: START_TTL_MS,
+        persist: true,
+        staleWhileRevalidate: true,
+        onRefresh: (value) => emit(IPC.START_INFO, buildStartPayload(value as StartFacts)),
+      }),
+    )
   },
 
   [IPC.CREATE_TAB]: () => ({ tabId: controlPlane.createTab() }),
@@ -559,8 +725,8 @@ const handlers: Record<string, (args: any) => unknown | Promise<unknown>> = {
     return { ok: true, provider, model, providers }
   },
 
-  [IPC.OPENCLAW_SET_MODEL]: ({ model }: any) => {
-    const r = runCli(['config', 'set', 'model', String(model)], 15000)
+  [IPC.OPENCLAW_SET_MODEL]: async ({ model }: any) => {
+    const r = await runCli(['config', 'set', 'model', String(model)], 15000)
     // The cached list carries the current selection, so it is stale the moment
     // the model changes.
     invalidateGatewayModelCache()
@@ -568,59 +734,37 @@ const handlers: Record<string, (args: any) => unknown | Promise<unknown>> = {
   },
   [IPC.OPENCLAW_ONBOARD]: () => runCli(['onboard'], 60000),
   [IPC.OPENCLAW_RUN]: ({ args }: any) => runCli(Array.isArray(args) ? args.map(String) : [], 60000),
-  // Returns NodeHostStatus (src/shared/types.ts:250) by parsing the CLI's
+
+  // Returns NodeHostStatus (src/shared/types.ts) by parsing the CLI's
   // human-readable output. Returning raw stdout left the panel showing
   // "Not installed" while the node was registered and running.
-  [IPC.NODE_STATUS]: (): NodeHostStatus => {
-    const r = runCli(['node', 'status'], 20000)
-    const text = r.stdout
+  //
+  // Cached: the call is ~7s of CLI startup and the panel polls it so an
+  // external change is eventually noticed, not because a Windows service
+  // changes on a UI cadence. Stale answers go out immediately and the refresh
+  // arrives over NODE_STATUS_UPDATE.
+  [IPC.NODE_STATUS]: () =>
+    probe('node-status', readNodeStatus, {
+      ttlMs: NODE_STATUS_TTL_MS,
+      staleWhileRevalidate: true,
+      onRefresh: (value) => emit(IPC.NODE_STATUS_UPDATE, value),
+    }),
 
-    const grab = (re: RegExp) => text.match(re)?.[1]?.trim() ?? null
-    const command = grab(/^Command:\s*(.+)$/m) ?? ''
-    const runtime = grab(/^Runtime:\s*(.+)$/m) ?? ''
+  [IPC.NODE_ACTION]: async ({ action }: any) => {
+    const r = await runCli(['node', String(action)], 30000)
+    // The action changes exactly what the cached status describes.
+    invalidateProbe('node-status')
+    return r
+  },
 
-    return {
-      installed: /registered/i.test(grab(/^Service:\s*(.+)$/m) ?? ''),
-      running: /\brunning\b/i.test(runtime),
-      pid: Number(runtime.match(/pid\s+(\d+)/i)?.[1]) || null,
-      displayName: grab(/^Name:\s*(.+)$/m),
-      nodeId: grab(/^Node ID:\s*(.+)$/m),
-      gatewayHost: command.match(/--host\s+(\S+)/)?.[1] ?? null,
-      gatewayPort: Number(command.match(/--port\s+(\d+)/)?.[1]) || null,
-      tls: /--tls\b/.test(command),
-      serviceKind: grab(/^Service:\s*(.+)$/m),
-      // The type requires credentials stripped before this crosses IPC.
-      raw: redactSecrets(text),
-    }
-  },
-  [IPC.NODE_ACTION]: ({ action }: any) => runCli(['node', String(action)], 30000),
-  [IPC.GATEWAY_STATUS]: async () => {
-    const token = resolveGatewayToken()
-    const res = await runCliAsync(['gateway', 'status'], 30000, token ? { OPENCLAW_GATEWAY_TOKEN: token } : {})
-    const text = `${res.stdout}\n${res.stderr}`.trim()
-    return {
-      ok: res.ok,
-      running: /Runtime:\s*running/i.test(text),
-      installed: !/Service unit not found|Service not installed/i.test(text),
-      output: redactSecrets(text),
-    }
-  },
-  // The probe must carry the credential or the gateway answers unreachable —
-  // which is exactly what the Control Center was reporting.
-  [IPC.GATEWAY_PROBE]: async () => {
-    const token = resolveGatewayToken()
-    const res = await runCliAsync(['gateway', 'probe'], 45000, token ? { OPENCLAW_GATEWAY_TOKEN: token } : {})
-    const text = `${res.stdout}\n${res.stderr}`.trim()
-    return {
-      ok: res.ok,
-      reachable: /Reachable:\s*yes/i.test(text),
-      capability: text.match(/Capability:\s*([^\n·]+)/i)?.[1]?.trim() || null,
-      // The gateway rejects operator calls until the credential carries
-      // operator scope; surface that rather than a generic failure.
-      missingOperatorScope: /missing scope:\s*operator/i.test(text),
-      output: redactSecrets(text),
-    }
-  },
+  [IPC.GATEWAY_STATUS]: () =>
+    probe('gateway-status', readGatewayStatus, {
+      ttlMs: GATEWAY_STATUS_TTL_MS,
+      staleWhileRevalidate: true,
+    }),
+
+  [IPC.GATEWAY_PROBE]: () => probe('gateway-probe', readGatewayProbe, { ttlMs: GATEWAY_PROBE_TTL_MS }),
+
   // Returns GatewayConfigView (src/shared/types.ts:269). Field names matter:
   // the panel reads remoteUrl/tokenRef/tokenResolvable, and my earlier ad-hoc
   // shape left the URL and Token rows blank while mode rendered fine.
@@ -638,13 +782,13 @@ const handlers: Record<string, (args: any) => unknown | Promise<unknown>> = {
     }
   },
 
-  [IPC.TRANSCRIBE_AUDIO]: ({ audioBase64 }: any) => {
+  [IPC.TRANSCRIBE_AUDIO]: async ({ audioBase64 }: any) => {
     // The CLI reads the clip from a file; a base64 blob on argv would blow the
     // command-line length limit.
     const file = join(tmpdir(), `clui-audio-${Date.now()}.webm`)
     try {
-      require('node:fs').writeFileSync(file, Buffer.from(String(audioBase64), 'base64'))
-      const r = runCli(['transcribe', file], 60000)
+      await writeFile(file, Buffer.from(String(audioBase64), 'base64'))
+      const r = await runCli(['transcribe', file], 60000)
       return { error: r.ok ? null : 'transcription failed', transcript: r.ok ? r.stdout : null }
     } catch (err: any) {
       return { error: String(err?.message ?? err), transcript: null }
@@ -838,6 +982,13 @@ createInterface({ input: process.stdin })
   })
   .on('close', () => {
     log('stdin closed, shutting down')
+    try {
+      // Persist what we learned about the CLI so the next launch paints from
+      // it instead of re-probing.
+      flushProbeCache()
+    } catch {
+      // best effort on the way out
+    }
     try {
       controlPlane.shutdown()
     } catch {
