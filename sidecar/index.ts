@@ -12,7 +12,13 @@
 
 import { createServer } from 'node:http'
 import { readFile } from 'node:fs/promises'
-import { appendFileSync, readFileSync as readFileSyncNode, statSync as statSyncNode } from 'node:fs'
+import {
+  appendFileSync,
+  readFileSync as readFileSyncNode,
+  renameSync as renameSyncNode,
+  statSync as statSyncNode,
+  writeFileSync as writeFileSyncNode,
+} from 'node:fs'
 import { extname, join, normalize, sep } from 'node:path'
 import { homedir } from 'node:os'
 import { execFile, execFileSync } from 'node:child_process'
@@ -157,6 +163,25 @@ type OpenclawConfig = {
  * minute. statSync is cheap next to a read plus a parse, and keying on mtime
  * means an edit by the CLI is still picked up on the next call.
  */
+function openclawConfigPath(): string {
+  return join(homedir(), '.openclaw', 'openclaw.json')
+}
+
+/**
+ * Write openclaw.json atomically.
+ *
+ * The CLI writes this file too, so a truncating whole-file rewrite can leave
+ * it unparseable for both processes. Write to a sibling temp file and rename,
+ * which is atomic within a volume.
+ */
+function writeOpenclawConfig(config: OpenclawConfig): void {
+  const path = openclawConfigPath()
+  const tmp = `${path}.${process.pid}.tmp`
+  writeFileSyncNode(tmp, JSON.stringify(config, null, 2) + '\n', 'utf-8')
+  renameSyncNode(tmp, path)
+  configCache = null
+}
+
 let configCache: { key: string; value: OpenclawConfig } | null = null
 function readOpenclawConfig(): OpenclawConfig {
   const path = join(homedir(), '.openclaw', 'openclaw.json')
@@ -778,7 +803,66 @@ const handlers: Record<string, (args: any) => unknown | Promise<unknown>> = {
       // Descriptor only — the token value never crosses IPC.
       tokenRef: ref ? { source: ref.source ?? 'env', id: envId } : null,
       tokenResolvable: !!process.env[envId],
-      configPath: join(homedir(), '.openclaw', 'openclaw.json'),
+      configPath: openclawConfigPath(),
+    }
+  },
+
+  /**
+   * Write the gateway settings the Control Center's Connection card edits.
+   *
+   * The port never wired this, so switching between Auto/Local/Remote failed
+   * with "not implemented in sidecar" and the mode never persisted.
+   */
+  [IPC.GATEWAY_CONFIG_SET]: ({ mode, remoteUrl, tokenEnvVar }: any) => {
+    try {
+      const config = readOpenclawConfig()
+      if (!config.gateway) config.gateway = {}
+
+      if (mode) config.gateway.mode = mode
+
+      if (remoteUrl !== undefined) {
+        const url = String(remoteUrl).trim()
+        if (url) {
+          const parsed = (() => {
+            try {
+              return new URL(url)
+            } catch {
+              return null
+            }
+          })()
+          if (!parsed) return { ok: false, error: `Not a valid URL: ${url}` }
+          // Refuse plaintext WebSocket to a non-loopback host: the credential
+          // would cross the public internet unencrypted.
+          const isLoopback = ['localhost', '127.0.0.1', '::1'].includes(parsed.hostname)
+          if (parsed.protocol === 'ws:' && !isLoopback) {
+            return { ok: false, error: 'Refusing an insecure ws:// URL for a remote host — use wss://' }
+          }
+          if (!['ws:', 'wss:'].includes(parsed.protocol)) {
+            return { ok: false, error: `Gateway URL must be ws:// or wss:// (got ${parsed.protocol})` }
+          }
+          if (!config.gateway.remote) config.gateway.remote = {}
+          config.gateway.remote.url = url
+          config.gateway.remote.enabled = true
+        }
+      }
+
+      if (tokenEnvVar) {
+        if (!/^[A-Z][A-Z0-9_]*$/i.test(String(tokenEnvVar))) {
+          return { ok: false, error: `Not a valid environment variable name: ${tokenEnvVar}` }
+        }
+        if (!config.gateway.remote) config.gateway.remote = {}
+        config.gateway.remote.token = { source: 'env', provider: 'default', id: String(tokenEnvVar) }
+      }
+
+      writeOpenclawConfig(config)
+      // Everything cached about the gateway described the old endpoint.
+      invalidateProbe('gateway-probe')
+      invalidateProbe('gateway-status')
+      invalidateGatewayModelCache()
+      log(`gateway config updated: mode=${config.gateway.mode} url=${config.gateway.remote?.url || '(unset)'}`)
+      return { ok: true }
+    } catch (err: any) {
+      return { ok: false, error: err?.message || 'Failed to update gateway config' }
     }
   },
 

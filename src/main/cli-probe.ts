@@ -260,9 +260,16 @@ export async function probe<T>(key: string, fn: () => Promise<T>, opts: ProbeOpt
 
   if (entry && opts.staleWhileRevalidate) {
     // Serve stale now; let the refresh land through onRefresh.
-    void refresh(key, fn, opts)
-      .then((value) => opts.onRefresh?.(value))
-      .catch(() => {})
+    //
+    // Only the caller that actually starts the refresh reports it. Attaching
+    // onRefresh unconditionally would hang one callback per concurrent stale
+    // reader onto the same deduped promise, so a poll loop and a button
+    // pressed together broadcast the identical result twice.
+    if (!inflight.has(key)) {
+      void refresh(key, fn, opts)
+        .then((value) => opts.onRefresh?.(value))
+        .catch(() => {})
+    }
     return entry.value
   }
 
