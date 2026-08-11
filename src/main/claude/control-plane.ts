@@ -1,6 +1,7 @@
 import { EventEmitter } from 'events'
 import { RunManager } from './run-manager'
 import { PtyRunManager } from './pty-run-manager'
+import { AgentRunManager } from './agent-run-manager'
 import { PermissionServer, maskSensitiveFields } from '../hooks/permission-server'
 import type { HookToolRequest, PermissionOption } from '../hooks/permission-server'
 import { log as _log } from '../logger'
@@ -63,10 +64,20 @@ export class ControlPlane extends EventEmitter {
   private requestQueue: QueuedRequest[] = []
   private runManager: RunManager
   private ptyRunManager: PtyRunManager
+  private agentRunManager: AgentRunManager
   /** Feature flag: use PTY transport for interactive permissions */
   private interactivePty: boolean
+  /**
+   * Structured `openclaw agent --json` transport. Preferred for OpenClaw
+   * because the TUI it replaces could only be read by scraping repainted
+   * terminal frames, which mangled every reply. Set CLUI_OPENCLAW_TUI=1 to
+   * force the old PTY path back on.
+   */
+  private useAgentJson: boolean
   /** Tracks which runs are using PTY transport (by requestId) */
   private ptyRuns = new Set<string>()
+  /** Tracks which runs are using the JSON agent transport (by requestId) */
+  private agentRuns = new Set<string>()
   /** Tracks requestIds that are warmup init requests (invisible to renderer) */
   private initRequestIds = new Set<string>()
   /** Permission hook server for PreToolUse HTTP hooks */
@@ -88,8 +99,10 @@ export class ControlPlane extends EventEmitter {
     const isOpenclawCli = getCliRuntime().kind === 'openclaw'
     // OpenClaw does not support legacy -p stream-json flags, so PTY is mandatory.
     this.interactivePty = isOpenclawCli ? true : interactivePty
+    this.useAgentJson = isOpenclawCli && process.env.CLUI_OPENCLAW_TUI !== '1'
     this.runManager = new RunManager()
     this.ptyRunManager = new PtyRunManager()
+    this.agentRunManager = new AgentRunManager()
     this.permissionServer = new PermissionServer()
 
     // Start the permission hook server. _dispatch awaits hookServerReady
@@ -139,9 +152,13 @@ export class ControlPlane extends EventEmitter {
     })
 
     log(`Interactive PTY transport: ${this.interactivePty ? 'ENABLED' : 'disabled'}`)
+    log(`OpenClaw JSON agent transport: ${this.useAgentJson ? 'ENABLED' : 'disabled'}`)
 
     // ─── Wire PtyRunManager events → ControlPlane routing ───
     this._wirePtyEvents()
+
+    // ─── Wire AgentRunManager events → ControlPlane routing ───
+    this._wireAgentEvents()
 
     // ─── Wire RunManager events → ControlPlane routing ───
 
@@ -445,6 +462,148 @@ export class ControlPlane extends EventEmitter {
     })
   }
 
+  /**
+   * Wire AgentRunManager events using the same routing logic as the others.
+   *
+   * The transport reports its own outcome before exiting (see
+   * AgentRunManager._finish), so the exit code is only consulted when it did
+   * not — a CLI that died before printing a response.
+   */
+  private _wireAgentEvents(): void {
+    this.agentRunManager.on('normalized', (requestId: string, event: NormalizedEvent) => {
+      const tabId = this._findTabByRequest(requestId)
+      if (!tabId) return
+
+      const tab = this.tabs.get(tabId)
+      if (!tab) return
+
+      tab.lastActivityAt = Date.now()
+
+      if (event.type === 'session_init') {
+        tab.claudeSessionId = event.sessionId
+
+        if (this.initRequestIds.has(requestId)) {
+          this.emit('event', tabId, { ...event, isWarmup: true })
+          return
+        }
+
+        if (tab.status === 'connecting') {
+          this._setTabStatus(tabId, 'running')
+        }
+      }
+
+      if (this.initRequestIds.has(requestId)) return
+
+      this.emit('event', tabId, event)
+    })
+
+    this.agentRunManager.on('exit', (requestId: string, code: number | null, signal: string | null, sessionId: string | null) => {
+      const runToken = this.runTokens.get(requestId)
+      if (runToken) {
+        this.permissionServer.unregisterRun(runToken)
+        this.runTokens.delete(requestId)
+      }
+
+      const tabId = this._findTabByRequest(requestId)
+      const inflight = this.inflightRequests.get(requestId)
+
+      this.agentRuns.delete(requestId)
+
+      if (!tabId || !this.tabs.get(tabId)) {
+        if (inflight) {
+          inflight.resolve()
+          this.inflightRequests.delete(requestId)
+        }
+        return
+      }
+
+      const tab = this.tabs.get(tabId)!
+      tab.activeRequestId = null
+      tab.runPid = null
+      if (sessionId) tab.claudeSessionId = sessionId
+
+      if (this.initRequestIds.has(requestId)) {
+        this.initRequestIds.delete(requestId)
+        this._setTabStatus(tabId, 'idle')
+        if (inflight) {
+          inflight.resolve()
+          this.inflightRequests.delete(requestId)
+        }
+        this._processQueue(tabId)
+        return
+      }
+
+      const outcome = this.agentRunManager.getHandle(requestId)?.terminalOutcome ?? null
+
+      if (outcome === 'error') {
+        this._setTabStatus(tabId, 'failed')
+      } else if (outcome === 'complete' || code === 0) {
+        this._setTabStatus(tabId, 'completed')
+      } else if (signal) {
+        this._setTabStatus(tabId, 'failed')
+      } else {
+        const enriched = this.agentRunManager.getEnrichedError(requestId, code)
+        this.emit('error', tabId, enriched)
+        this._setTabStatus(tabId, code === null ? 'dead' : 'failed')
+      }
+
+      if (inflight) {
+        inflight.resolve()
+        this.inflightRequests.delete(requestId)
+      }
+
+      this._processQueue(tabId)
+    })
+
+    this.agentRunManager.on('error', (requestId: string, err: Error) => {
+      const runToken = this.runTokens.get(requestId)
+      if (runToken) {
+        this.permissionServer.unregisterRun(runToken)
+        this.runTokens.delete(requestId)
+      }
+
+      const tabId = this._findTabByRequest(requestId)
+      const inflight = this.inflightRequests.get(requestId)
+
+      this.agentRuns.delete(requestId)
+
+      if (!tabId || !this.tabs.get(tabId)) {
+        if (inflight) {
+          inflight.reject(err)
+          this.inflightRequests.delete(requestId)
+        }
+        return
+      }
+
+      const tab = this.tabs.get(tabId)!
+      tab.activeRequestId = null
+      tab.runPid = null
+
+      if (this.initRequestIds.has(requestId)) {
+        this.initRequestIds.delete(requestId)
+        log(`Agent init session error for tab ${tabId}: ${err.message}`)
+        this._setTabStatus(tabId, 'idle')
+        if (inflight) {
+          inflight.reject(err)
+          this.inflightRequests.delete(requestId)
+        }
+        this._processQueue(tabId)
+        return
+      }
+
+      this._setTabStatus(tabId, 'dead')
+
+      const enriched = this.agentRunManager.getEnrichedError(requestId, null)
+      enriched.message = err.message
+      this.emit('error', tabId, enriched)
+
+      if (inflight) {
+        inflight.reject(err)
+        this.inflightRequests.delete(requestId)
+      }
+    })
+  }
+
   // ─── Tab Lifecycle ───
 
   createTab(): string {
@@ -661,12 +820,19 @@ export class ControlPlane extends EventEmitter {
     this._setTabStatus(tabId, newStatus)
 
     // ─── Pick transport ───
-    // OpenClaw compatibility requires PTY transport (legacy -p path is not supported).
-    const usePty = this.interactivePty
+    // OpenClaw prefers the structured `agent --json` transport; the PTY path is
+    // the fallback for it and the only option for the Claude CLI, which does
+    // not support the legacy -p stream-json flags under OpenClaw.
+    const usePty = this.interactivePty && !this.useAgentJson
 
     let pid: number | null = null
     try {
-      if (usePty) {
+      if (this.useAgentJson) {
+        log(`Dispatching via JSON agent transport: ${requestId}`)
+        const handle = this.agentRunManager.startRun(requestId, options)
+        this.agentRuns.add(requestId)
+        pid = handle.pid
+      } else if (usePty) {
         log(`Dispatching via PTY transport: ${requestId}`)
         const handle = this.ptyRunManager.startRun(requestId, options)
         this.ptyRuns.add(requestId)
@@ -711,6 +877,9 @@ export class ControlPlane extends EventEmitter {
     }
 
     // Cancel active run — route to correct transport
+    if (this.agentRuns.has(requestId)) {
+      return this.agentRunManager.cancel(requestId)
+    }
     if (this.ptyRuns.has(requestId)) {
       return this.ptyRunManager.cancel(requestId)
     }
@@ -758,6 +927,14 @@ export class ControlPlane extends EventEmitter {
     const tab = this.tabs.get(tabId)
     if (!tab?.activeRequestId) return false
 
+    // The JSON transport has no interactive surface to answer on: approvals for
+    // a gateway-backed run belong to the gateway (exec.approval.*), and there is
+    // nothing local to type into.
+    if (this.agentRuns.has(tab.activeRequestId)) {
+      log('respondToPermission: JSON agent transport has no local permission surface')
+      return false
+    }
+
     // Route to correct transport
     if (this.ptyRuns.has(tab.activeRequestId)) {
       return this.ptyRunManager.respondToPermission(tab.activeRequestId, questionId, optionId)
@@ -783,6 +960,7 @@ export class ControlPlane extends EventEmitter {
       if (tab.activeRequestId) {
         alive = this.runManager.isRunning(tab.activeRequestId)
           || this.ptyRunManager.isRunning(tab.activeRequestId)
+          || this.agentRunManager.isRunning(tab.activeRequestId)
       }
 
       tabEntries.push({
@@ -805,6 +983,9 @@ export class ControlPlane extends EventEmitter {
   }
 
   getEnrichedError(requestId: string, exitCode: number | null): EnrichedError {
+    if (this.agentRuns.has(requestId)) {
+      return this.agentRunManager.getEnrichedError(requestId, exitCode)
+    }
     if (this.ptyRuns.has(requestId)) {
       return this.ptyRunManager.getEnrichedError(requestId, exitCode)
     }

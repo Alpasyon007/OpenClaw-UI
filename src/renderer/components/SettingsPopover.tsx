@@ -2,7 +2,7 @@ import React, { useState, useRef, useEffect, useCallback } from 'react'
 import { createPortal } from 'react-dom'
 import { motion } from 'framer-motion'
 import { DotsThree, Bell, ArrowsOutSimple, Moon, GearSix } from '@phosphor-icons/react'
-import { useThemeStore } from '../theme'
+import { useThemeStore, usePanelWidth } from '../theme'
 import { useSessionStore } from '../stores/sessionStore'
 import { usePopoverLayer } from './PopoverLayer'
 import { useColors } from '../theme'
@@ -48,8 +48,9 @@ export function SettingsPopover() {
   const setSoundEnabled = useThemeStore((s) => s.setSoundEnabled)
   const themeMode = useThemeStore((s) => s.themeMode)
   const setThemeMode = useThemeStore((s) => s.setThemeMode)
-  const expandedUI = useThemeStore((s) => s.expandedUI)
-  const setExpandedUI = useThemeStore((s) => s.setExpandedUI)
+  const widthMode = useThemeStore((s) => s.widthMode)
+  const setWidthMode = useThemeStore((s) => s.setWidthMode)
+  const panelWidth = usePanelWidth()
   const isExpanded = useSessionStore((s) => s.isExpanded)
   const openControlCenter = useSessionStore((s) => s.openControlCenter)
   const popoverLayer = usePopoverLayer()
@@ -118,7 +119,7 @@ export function SettingsPopover() {
     return () => {
       if (raf) cancelAnimationFrame(raf)
     }
-  }, [open, expandedUI, isExpanded, updatePos])
+  }, [open, panelWidth, isExpanded, updatePos])
 
   const handleToggle = () => {
     if (!open) updatePos()
@@ -176,8 +177,30 @@ export function SettingsPopover() {
                     Full width
                   </div>
                 </div>
-                <RowToggle checked={expandedUI} onChange={setExpandedUI} colors={colors} label="Toggle full width panel" />
+                <RowToggle
+                  checked={widthMode === 'full'}
+                  onChange={(next) => setWidthMode(next ? 'full' : 'standard')}
+                  colors={colors}
+                  label="Toggle full width panel"
+                />
               </div>
+              {/* What the toggle currently resolves to, and where to change it. */}
+              <button
+                type="button"
+                onClick={() => openControlCenter('appearance')}
+                className="text-[10px] mt-1"
+                style={{
+                  color: colors.textTertiary,
+                  background: 'none',
+                  border: 'none',
+                  padding: 0,
+                  cursor: 'pointer',
+                  fontFamily: 'inherit',
+                }}
+                title="Set the standard and full widths in Appearance"
+              >
+                {panelWidth}px · edit sizes in Appearance
+              </button>
             </div>
 
             <div style={{ height: 1, background: colors.popoverBorder }} />

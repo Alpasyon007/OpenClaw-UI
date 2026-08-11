@@ -11,7 +11,7 @@ import {
 import { useSessionStore } from '../stores/sessionStore'
 import { PermissionCard } from './PermissionCard'
 import { PermissionDeniedCard } from './PermissionDeniedCard'
-import { useColors, useThemeStore, useBranding } from '../theme'
+import { useColors, useBranding, panelMetrics, usePanelWidth } from '../theme'
 import { usePopoverLayer } from './PopoverLayer'
 import { useShortcuts } from '../hooks/useShortcuts'
 import type { Message } from '../../shared/types'
@@ -79,7 +79,7 @@ export function ConversationView() {
   const prevTabIdRef = useRef(activeTabId)
   const colors = useColors()
   const branding = useBranding()
-  const expandedUI = useThemeStore((s) => s.expandedUI)
+  const panelWidth = usePanelWidth()
   const popoverLayer = usePopoverLayer()
 
   const tab = tabs.find((t) => t.id === activeTabId)
@@ -273,33 +273,35 @@ export function ConversationView() {
       <div
         ref={scrollRef}
         className="overflow-y-auto overflow-x-hidden px-4 pt-2 conversation-selectable"
-        style={{ maxHeight: expandedUI ? 460 : 336, paddingBottom: 28 }}
+        style={{ maxHeight: panelMetrics(panelWidth).conversationMaxHeight, paddingBottom: 28 }}
         onScroll={handleScroll}
       >
         <div
-          className="mb-2 flex items-center justify-center"
+          className="mb-2 flex items-center"
           style={{ position: 'sticky', top: 0, zIndex: 3, background: colors.containerBg, paddingBottom: 4 }}
         >
+          {/* Spans the conversation column: the panel width is user-set now, so
+              a fixed-width pill left an increasingly odd gap as it widened. */}
           <div
-            className="flex items-center rounded-full px-2.5 py-1.5"
+            className="flex items-center rounded-full px-2.5 py-1.5 w-full"
             style={{
               border: `1px solid ${colors.containerBorder}`,
               background: colors.surfacePrimary,
               boxShadow: `0 8px 24px ${colors.shadowMid}`,
             }}
           >
-            <MagnifyingGlass size={12} style={{ color: colors.textTertiary }} />
+            <MagnifyingGlass size={12} className="flex-shrink-0" style={{ color: colors.textTertiary }} />
             <input
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
               placeholder="Search chat..."
-              className="bg-transparent outline-none text-[11px]"
-              style={{ color: colors.textPrimary, width: 240 }}
+              className="bg-transparent outline-none text-[11px] flex-1 min-w-0 ml-1.5"
+              style={{ color: colors.textPrimary }}
             />
-            <span className="text-[10px]" style={{ color: colors.textTertiary, minWidth: 36, textAlign: 'right' }}>
+            <span className="text-[10px] flex-shrink-0" style={{ color: colors.textTertiary, minWidth: 36, textAlign: 'right' }}>
               {searchableIds.length > 0 ? `${Math.min(searchIndex + 1, searchableIds.length)}/${searchableIds.length}` : '0'}
             </span>
-            <div className="flex items-center gap-0.5 ml-1">
+            <div className="flex items-center gap-0.5 ml-1 flex-shrink-0">
               <button
                 onClick={() => jumpSearch(-1)}
                 className="text-[10px] p-1 rounded-full"
@@ -329,14 +331,14 @@ export function ConversationView() {
                 <CaretDown size={12} />
               </button>
             </div>
-            <div className="mx-2 h-5" style={{ width: 1, background: colors.containerBorder, opacity: 0.7 }} />
+            <div className="mx-2 h-5 flex-shrink-0" style={{ width: 1, background: colors.containerBorder, opacity: 0.7 }} />
             <button
               ref={exportButtonRef}
               onClick={() => {
                 if (!exportOpen) updateExportPos()
                 setExportOpen((o) => !o)
               }}
-              className="text-[10px] p-1.5 rounded-full inline-flex items-center gap-1"
+              className="text-[10px] p-1.5 rounded-full inline-flex items-center gap-1 flex-shrink-0"
               style={{ border: `1px solid ${colors.containerBorder}`, color: colors.textSecondary, background: colors.surfaceElevated }}
               title="Export conversation"
             >

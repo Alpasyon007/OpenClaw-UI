@@ -544,11 +544,25 @@ function writeOpenclawConfig(config: OpenclawConfig): void {
   renameSync(tmp, path)
 }
 
-// Keep native width fixed to avoid renderer animation vs setBounds race.
-// The UI itself still launches in compact mode; extra width is transparent/click-through.
-const BAR_WIDTH = 1040
+// Native width is held constant *during* a session's animations — resizing per
+// frame races the renderer's expand/collapse. It changes only when the user
+// changes the width setting, which is a discrete event with nothing animating.
+// The extra width beyond the panel is transparent and click-through.
+const DEFAULT_BAR_WIDTH = 1040
+/**
+ * Floor for the native window regardless of panel width: the Control Center
+ * (920px) and marketplace (720px) are laid out independently of the chat
+ * column, so a narrow panel must not shrink the window out from under them.
+ */
+const MIN_BAR_WIDTH = DEFAULT_BAR_WIDTH
+let barWidth = DEFAULT_BAR_WIDTH
 const PILL_HEIGHT = 720  // Fixed native window height — extra room for expanded UI + shadow buffers
 const PILL_BOTTOM_MARGIN = 24
+
+/** Widest the window may be on a given display, keeping it fully on screen. */
+function maxBarWidthFor(workAreaWidth: number): number {
+  return Math.max(MIN_BAR_WIDTH, workAreaWidth)
+}
 
 // ─── Broadcast to renderer ───
 
@@ -614,11 +628,12 @@ function createWindow(): void {
   const { width: screenWidth, height: screenHeight } = display.workAreaSize
   const { x: dx, y: dy } = display.workArea
 
-  const x = dx + Math.round((screenWidth - BAR_WIDTH) / 2)
+  barWidth = Math.min(barWidth, maxBarWidthFor(screenWidth))
+  const x = dx + Math.round((screenWidth - barWidth) / 2)
   const y = dy + screenHeight - PILL_HEIGHT - PILL_BOTTOM_MARGIN
 
   mainWindow = new BrowserWindow({
-    width: BAR_WIDTH,
+    width: barWidth,
     height: PILL_HEIGHT,
     x,
     y,
@@ -752,10 +767,13 @@ function showWindow(source = 'unknown'): void {
   const display = screen.getDisplayNearestPoint(cursor)
   const { width: sw, height: sh } = display.workAreaSize
   const { x: dx, y: dy } = display.workArea
+  // Clamp per display: a width chosen on an ultrawide must not hang off the
+  // side of a laptop screen the launcher is later summoned onto.
+  const effectiveWidth = Math.min(barWidth, maxBarWidthFor(sw))
   const target = {
-    x: dx + Math.round((sw - BAR_WIDTH) / 2),
+    x: dx + Math.round((sw - effectiveWidth) / 2),
     y: dy + sh - PILL_HEIGHT - PILL_BOTTOM_MARGIN,
-    width: BAR_WIDTH,
+    width: effectiveWidth,
     height: PILL_HEIGHT,
   }
   // Only move when something actually changes. Re-applying identical bounds
@@ -877,8 +895,40 @@ ipcMain.on(IPC.RESIZE_HEIGHT, () => {
   // No-op — fixed height window, no dynamic resize
 })
 
-ipcMain.on(IPC.SET_WINDOW_WIDTH, () => {
-  // No-op — native width is fixed to keep expand/collapse animation smooth.
+/**
+ * The renderer asks for the room its panel needs.
+ *
+ * This is not per-frame resizing — it fires when the width *setting* changes,
+ * where nothing is animating and a bounds change is invisible. Without it a
+ * panel wider than the window is simply clipped, which is what made a
+ * percentage-of-screen width impossible to honour.
+ */
+ipcMain.on(IPC.SET_WINDOW_WIDTH, (_event, width: number) => {
+  if (!mainWindow || mainWindow.isDestroyed()) return
+  if (typeof width !== 'number' || !Number.isFinite(width)) return
+
+  const display = screen.getDisplayNearestPoint(mainWindow.getBounds())
+  const next = Math.round(Math.min(maxBarWidthFor(display.workAreaSize.width), Math.max(MIN_BAR_WIDTH, width)))
+  if (next === barWidth) return
+  log(`Window width: ${barWidth} → ${next} (requested ${Math.round(width)}, display ${display.workAreaSize.width})`)
+  barWidth = next
+
+  // Parked windows are re-laid-out by the next summon, which reads barWidth.
+  // Resizing one now would drag it back toward the screen edge.
+  if (!isLauncherVisible()) return
+
+  const current = mainWindow.getBounds()
+  if (current.width === next) return
+  // Grow about the centre so the launcher does not appear to slide sideways.
+  const resized = {
+    ...current,
+    x: Math.round(current.x - (next - current.width) / 2),
+    width: next,
+  }
+  mainWindow.setBounds(resized)
+  // Screenshot capture restores these bounds afterwards; leaving the old width
+  // here would silently undo the resize.
+  lastVisibleBounds = { ...resized }
 })
 
 ipcMain.handle(IPC.ANIMATE_HEIGHT, () => {
@@ -1949,11 +1999,16 @@ function resolveGatewayToken(): string | null {
  * and the credential travels in the child's environment rather than on its
  * command line where other local processes could read it.
  */
-async function gatewayCallJson(method: string, params: unknown = {}, timeoutMs = 25000): Promise<any | null> {
+async function gatewayCallDetailed(
+  method: string,
+  params: unknown = {},
+  timeoutMs = 25000,
+): Promise<{ ok: boolean; data: any | null; error: string | null }> {
   const token = resolveGatewayToken()
   if (!token) {
-    log(`gateway call ${method} skipped — no gateway credential resolvable in this process`)
-    return null
+    const error = 'no gateway credential resolvable in this process'
+    log(`gateway call ${method} skipped — ${error}`)
+    return { ok: false, data: null, error }
   }
 
   const res = await runCliAsync(
@@ -1962,20 +2017,27 @@ async function gatewayCallJson(method: string, params: unknown = {}, timeoutMs =
     { OPENCLAW_GATEWAY_TOKEN: token },
   )
   if (!res.stdout) {
-    log(`gateway call ${method} produced no output: ${res.stderr.slice(0, 200)}`)
-    return null
+    const error = res.stderr.slice(0, 200).trim() || 'the gateway returned no output'
+    log(`gateway call ${method} produced no output: ${error}`)
+    return { ok: false, data: null, error }
   }
   try {
     const parsed = JSON.parse(res.stdout)
     if (parsed && parsed.ok === false) {
-      log(`gateway call ${method} rejected: ${parsed.error?.message || 'unknown error'}`)
-      return null
+      const error = parsed.error?.message || 'unknown error'
+      log(`gateway call ${method} rejected: ${error}`)
+      return { ok: false, data: null, error }
     }
-    return parsed
+    return { ok: true, data: parsed, error: null }
   } catch {
+    const error = 'the gateway returned unparseable output'
     log(`gateway call ${method} returned unparseable output`)
-    return null
+    return { ok: false, data: null, error }
   }
+}
+
+async function gatewayCallJson(method: string, params: unknown = {}, timeoutMs = 25000): Promise<any | null> {
+  return (await gatewayCallDetailed(method, params, timeoutMs)).data
 }
 
 /**
@@ -2071,12 +2133,48 @@ async function _fetchGatewayModelInfoUncached(): Promise<GatewayModelInfo | null
  *
  * `agents.list` is an array, and config.patch replaces arrays wholesale, so
  * this is a read-modify-write of the whole list rather than a targeted set.
+ *
+ * That read-modify-write is exactly what `config.patch` guards: it requires the
+ * hash of the snapshot the patch was computed from, and rejects the write if
+ * the file moved in between. The hash has to come from the `config.get`
+ * response — it cannot be computed here, because `config.get` redacts
+ * credentials out of `raw`, so hashing what we received would never match what
+ * the gateway holds.
+ *
+ * A losing race is retried once against a fresh snapshot: the config changing
+ * mid-edit is ordinary (another client, or the agent itself), and a single
+ * retry turns it into a non-event rather than an error the user has to
+ * understand.
  */
 async function setGatewayModel(provider: string, model: string): Promise<{ ok: boolean; error?: string }> {
-  const cfg = await gatewayCallJson('config.get', {})
-  const parsed = cfg?.parsed
-  if (!parsed) return { ok: false, error: 'Could not read gateway configuration' }
+  const attempt = async (): Promise<{ ok: boolean; error?: string; stale?: boolean }> => {
+    const cfg = await gatewayCallJson('config.get', {})
+    const parsed = cfg?.parsed
+    if (!parsed) return { ok: false, error: 'Could not read gateway configuration' }
 
+    const baseHash = typeof cfg?.hash === 'string' ? cfg.hash.trim() : ''
+    if (!baseHash && cfg?.exists !== false) {
+      return { ok: false, error: 'Gateway did not report a configuration hash — it may be running an older build' }
+    }
+
+    return writeModelPatch(parsed, provider, model, baseHash)
+  }
+
+  const first = await attempt()
+  if (first.ok || !first.stale) return { ok: first.ok, error: first.error }
+
+  log('Gateway config changed mid-edit — retrying model change against a fresh snapshot')
+  const second = await attempt()
+  return { ok: second.ok, error: second.error }
+}
+
+/** Build and send the agents patch for one snapshot. Split out so it can be retried. */
+async function writeModelPatch(
+  parsed: any,
+  provider: string,
+  model: string,
+  baseHash: string,
+): Promise<{ ok: boolean; error?: string; stale?: boolean }> {
   const target = `${provider}/${model}`
   const agents = parsed.agents || {}
   const list: any[] = Array.isArray(agents.list) ? agents.list : []
@@ -2104,8 +2202,34 @@ async function setGatewayModel(provider: string, model: string): Promise<{ ok: b
     },
   }
 
-  const res = await gatewayCallJson('config.patch', { raw: JSON.stringify(patch) }, 30000)
-  if (!res) return { ok: false, error: 'Gateway rejected the configuration patch' }
+  const res = await gatewayCallDetailed(
+    'config.patch',
+    {
+      raw: JSON.stringify(patch),
+      baseHash,
+      // Dropping unusable fallbacks shrinks this array, and the gateway refuses
+      // to shorten an array unless the caller names the path — a guard against
+      // a partial patch silently deleting config it never meant to touch. The
+      // filtering above is deliberate, so the path is declared. Naming it also
+      // makes the merge treat our list as authoritative rather than unioning it
+      // with the old one, which is the only way a removal can take effect.
+      replacePaths: ['agents.list[].model.fallbacks'],
+    },
+    30000,
+  )
+  if (!res.ok) {
+    // "changed since last load" is the optimistic-write race, not a bad patch.
+    const stale = /changed since last load/i.test(res.error || '')
+    return {
+      ok: false,
+      stale,
+      // Pass the gateway's own words through: the previous generic message sent
+      // the user hunting through the debug log to find out what was wrong.
+      error: res.error
+        ? `Gateway rejected the configuration patch — ${res.error}`
+        : 'Gateway rejected the configuration patch',
+    }
+  }
   // The cached view now describes the old selection.
   invalidateGatewayModelCache()
   log(`Gateway default model set to ${target}`)

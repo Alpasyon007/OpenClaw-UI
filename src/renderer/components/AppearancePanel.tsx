@@ -2,7 +2,12 @@ import React, { useState } from 'react'
 import {
   Palette, ArrowsClockwise, DownloadSimple, UploadSimple, Trash, Check,
 } from '@phosphor-icons/react'
-import { useColors, useThemeStore, BUILT_IN_THEMES } from '../theme'
+import {
+  useColors, useThemeStore, BUILT_IN_THEMES,
+  useScreenWidth, resolveWidth, maxPanelWidthFor,
+  PANEL_WIDTH_MIN, PANEL_PERCENT_MIN, PANEL_PERCENT_MAX,
+  type WidthSetting, type WidthMode,
+} from '../theme'
 import { derivePalette } from '../theme-derive'
 import type { Theme, ThemeSeeds } from '../../shared/theme-types'
 
@@ -43,6 +48,12 @@ export function AppearancePanel() {
   const upsertCustomTheme = useThemeStore((s) => s.upsertCustomTheme)
   const deleteCustomTheme = useThemeStore((s) => s.deleteCustomTheme)
   const resetTheme = useThemeStore((s) => s.resetTheme)
+  const widthMode = useThemeStore((s) => s.widthMode)
+  const setWidthMode = useThemeStore((s) => s.setWidthMode)
+  const standardWidth = useThemeStore((s) => s.standardWidth)
+  const fullWidth = useThemeStore((s) => s.fullWidth)
+  const setWidthSetting = useThemeStore((s) => s.setWidthSetting)
+  const screenWidth = useScreenWidth()
 
   const [status, setStatus] = useState<string | null>(null)
 
@@ -126,6 +137,40 @@ export function AppearancePanel() {
         </div>
       </Card>
 
+      <Card title="Layout" colors={colors}>
+        <div style={{ fontSize: 10, color: colors.textTertiary, marginBottom: 9, lineHeight: 1.45 }}>
+          The launcher has two widths and the quick-settings toggle picks between them. Set each
+          one in pixels, or as a share of the screen so it follows whatever display you summon it
+          on. This screen is {screenWidth}px wide; the widest panel it can show is{' '}
+          {maxPanelWidthFor(screenWidth)}px.
+        </div>
+
+        <div style={{ display: 'flex', gap: 6, marginBottom: 10, alignItems: 'center' }}>
+          <span style={{ fontSize: 10, color: colors.textSecondary }}>Currently using</span>
+          <Pill active={widthMode === 'standard'} label="Standard" onClick={() => setWidthMode('standard')} colors={colors} />
+          <Pill active={widthMode === 'full'} label="Full" onClick={() => setWidthMode('full')} colors={colors} />
+        </div>
+
+        <WidthEditor
+          label="Standard width"
+          hint="Full width toggled off"
+          setting={standardWidth}
+          screenWidth={screenWidth}
+          active={widthMode === 'standard'}
+          onChange={(s) => setWidthSetting('standard', s)}
+          colors={colors}
+        />
+        <WidthEditor
+          label="Full width"
+          hint="Full width toggled on"
+          setting={fullWidth}
+          screenWidth={screenWidth}
+          active={widthMode === 'full'}
+          onChange={(s) => setWidthSetting('full', s)}
+          colors={colors}
+        />
+      </Card>
+
       <Card title="Shape & Feel" colors={colors}>
         <SliderRow
           label="Corner radius" suffix="px" min={0} max={32} step={1}
@@ -171,6 +216,106 @@ export function AppearancePanel() {
 }
 
 /* ─── Pieces ─── */
+
+/**
+ * One of the two configurable widths.
+ *
+ * The unit is part of the value, not a display preference: px pins the panel to
+ * an absolute size, percent re-resolves it against whatever display the
+ * launcher is summoned onto. Switching unit converts the current width rather
+ * than resetting it, so the panel does not jump when you change how it is
+ * expressed. The resolved px is always shown, because a percentage tells you
+ * nothing about whether the result still fits.
+ */
+function WidthEditor({ label, hint, setting, screenWidth, active, onChange, colors }: {
+  label: string
+  hint: string
+  setting: WidthSetting
+  screenWidth: number
+  active: boolean
+  onChange: (setting: WidthSetting) => void
+  colors: Colors
+}) {
+  const resolved = resolveWidth(setting, screenWidth)
+  const maxPx = maxPanelWidthFor(screenWidth)
+  const isPercent = setting.unit === 'percent'
+
+  const switchUnit = (unit: WidthSetting['unit']): void => {
+    if (unit === setting.unit) return
+    onChange(unit === 'percent'
+      ? { unit: 'percent', value: Math.round((resolved / Math.max(1, screenWidth)) * 100) }
+      : { unit: 'px', value: resolved })
+  }
+
+  return (
+    <div
+      style={{
+        marginBottom: 9,
+        padding: 9,
+        borderRadius: 9,
+        border: `1px solid ${active ? colors.accent : colors.containerBorder}`,
+        background: colors.surfacePrimary,
+      }}
+    >
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 7 }}>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ fontSize: 11, fontWeight: 600, color: colors.textPrimary }}>{label}</div>
+          <div style={{ fontSize: 9, color: colors.textTertiary }}>{hint}</div>
+        </div>
+        <div style={{ display: 'flex', gap: 3 }}>
+          {(['px', 'percent'] as const).map((u) => (
+            <button
+              key={u}
+              onClick={() => switchUnit(u)}
+              aria-pressed={setting.unit === u}
+              style={{
+                fontSize: 10, fontWeight: 600, borderRadius: 6, padding: '3px 7px', cursor: 'pointer',
+                fontFamily: 'inherit',
+                border: `1px solid ${setting.unit === u ? colors.accent : colors.containerBorder}`,
+                background: setting.unit === u ? colors.accentLight : 'transparent',
+                color: setting.unit === u ? colors.accent : colors.textSecondary,
+              }}
+            >
+              {u === 'px' ? 'px' : '% of screen'}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
+        <input
+          type="number"
+          value={setting.value}
+          min={isPercent ? PANEL_PERCENT_MIN : PANEL_WIDTH_MIN}
+          max={isPercent ? PANEL_PERCENT_MAX : maxPx}
+          step={isPercent ? 1 : 10}
+          onChange={(e) => {
+            const n = Number(e.target.value)
+            if (Number.isFinite(n)) onChange({ unit: setting.unit, value: n })
+          }}
+          style={{
+            width: 66, fontSize: 11, fontFamily: 'ui-monospace, monospace',
+            borderRadius: 6, background: colors.surfaceHover, color: colors.textPrimary,
+            border: `1px solid ${colors.containerBorder}`, padding: '4px 6px',
+          }}
+        />
+        <input
+          type="range"
+          min={isPercent ? PANEL_PERCENT_MIN : PANEL_WIDTH_MIN}
+          max={isPercent ? PANEL_PERCENT_MAX : maxPx}
+          step={isPercent ? 1 : 10}
+          value={Math.min(setting.value, isPercent ? PANEL_PERCENT_MAX : maxPx)}
+          aria-label={label}
+          onChange={(e) => onChange({ unit: setting.unit, value: Number(e.target.value) })}
+          style={{ flex: 1, accentColor: colors.accent }}
+        />
+        <span style={{ fontSize: 10, color: colors.textTertiary, fontFamily: 'ui-monospace, monospace', minWidth: 52, textAlign: 'right' }}>
+          {isPercent ? `${resolved}px` : `${Math.round((resolved / Math.max(1, screenWidth)) * 100)}%`}
+        </span>
+      </div>
+    </div>
+  )
+}
 
 function ThemeCard({ theme, isDark, active, colors, onSelect, onDelete }: {
   theme: Theme

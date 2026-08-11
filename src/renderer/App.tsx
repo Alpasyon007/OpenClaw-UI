@@ -15,7 +15,7 @@ import { useClaudeEvents } from './hooks/useClaudeEvents'
 import { useHealthReconciliation } from './hooks/useHealthReconciliation'
 import { useWorkingMonitor } from './hooks/useWorkingMonitor'
 import { useSessionStore } from './stores/sessionStore'
-import { useColors, useThemeStore, spacing } from './theme'
+import { useColors, useThemeStore, panelMetrics, usePanelWidth } from './theme'
 
 const TRANSITION = { duration: 0.26, ease: [0.4, 0, 0.1, 1] as const }
 
@@ -55,7 +55,7 @@ export default function App() {
   const setBaseDirectory = useSessionStore((s) => s.setBaseDirectory)
   const colors = useColors()
   const setSystemTheme = useThemeStore((s) => s.setSystemTheme)
-  const expandedUI = useThemeStore((s) => s.expandedUI)
+  const panelWidth = usePanelWidth()
   const [showOnboarding, setShowOnboarding] = useState(false)
   // Drives the summon entrance/exit. Starts true so the launcher is present on
   // first paint at startup, where there is nothing to animate in from.
@@ -232,7 +232,7 @@ export default function App() {
     {
       id: 'quick-settings',
       title: 'Quick Settings',
-      body: 'Open quick settings to switch theme, full width mode, and access OpenClaw checks.',
+      body: 'Open quick settings to switch theme, resize the panel, and access OpenClaw checks.',
       selector: '[data-tour=\"settings-trigger\"]',
     },
     {
@@ -360,18 +360,20 @@ export default function App() {
     window.clui.setDragHolding(draggingFiles)
   }, [draggingFiles])
 
-  // Layout dimensions — expandedUI widens and heightens the panel
-  const contentWidth = expandedUI ? 700 : spacing.contentWidth
-  const cardExpandedWidth = expandedUI ? 700 : 460
-  const cardCollapsedWidth = expandedUI ? 670 : 430
-  const cardCollapsedMargin = expandedUI ? 15 : 15
+  // Layout dimensions — the chosen panel width drives the column, the card, and
+  // the heights that go with it (see panelMetrics).
+  const metrics = panelMetrics(panelWidth)
+  const contentWidth = panelWidth
+  const cardExpandedWidth = panelWidth
+  const cardCollapsedWidth = metrics.collapsedWidth
+  const cardCollapsedMargin = 15
 
   // The column is bottom-anchored inside a fixed-height window, so anything
   // that does not fit is clipped off the TOP — where the takeover panels live.
   // When one is open the conversation yields most of its height to it, and the
   // panel itself is additionally capped to the viewport.
   const takeoverOpen = controlCenterOpen || marketplaceOpen || skillBuilderOpen
-  const bodyMaxHeight = takeoverOpen ? 150 : expandedUI ? 520 : 400
+  const bodyMaxHeight = takeoverOpen ? 150 : metrics.bodyMaxHeight
   const panelMaxHeight = 'min(560px, calc(100vh - 300px))'
 
   const handleScreenshot = useCallback(async () => {
@@ -406,7 +408,7 @@ export default function App() {
             <div
               data-clui-ui
               style={{
-                width: Math.min(720, expandedUI ? 720 : 620),
+                width: metrics.onboardingWidth,
                 maxWidth: 720,
                 marginLeft: '50%',
                 transform: 'translateX(-50%)',
