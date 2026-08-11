@@ -9,6 +9,7 @@ import { ensureSkills, type SkillStatus } from './skills/installer'
 import { fetchCatalog, listInstalled, installPlugin, uninstallPlugin } from './marketplace/catalog'
 import { log as _log, LOG_FILE, flushLogs } from './logger'
 import { getCliEnv } from './cli-env'
+import { runCliAsync, runBinAsync, probe, peekProbe, invalidateProbe, flushProbeCache } from './cli-probe'
 import { IPC } from '../shared/types'
 import { getShortcuts, type ShortcutId } from '../shared/shortcuts'
 import { validateTheme, THEME_FILE_KIND, THEME_FILE_VERSION, type ThemeFile } from '../shared/theme-types'
@@ -125,90 +126,37 @@ function sampleCpuPercent(): number {
   return Math.max(0, Math.min(100, Math.round((1 - idleDelta / totalDelta) * 100)))
 }
 
-/** Run the CLI synchronously. Never throws; failures come back structured. */
-function runCliSync(
-  args: string[],
-  timeoutMs = 15000,
-): { ok: boolean; stdout: string; stderr: string } {
-  const { execFileSync } = require('child_process')
-  const { command, args: full } = cliInvocation(args)
-  try {
-    const stdout = String(
-      execFileSync(command, full, {
-        encoding: 'utf-8',
-        timeout: timeoutMs,
-        env: getCliEnv(getCliRuntime().extraEnv),
-        stdio: ['ignore', 'pipe', 'pipe'],
-      }),
-    ).trim()
-    return { ok: true, stdout, stderr: '' }
-  } catch (err: any) {
-    return {
-      ok: false,
-      stdout: String(err?.stdout || '').trim(),
-      stderr: String(err?.stderr || err?.message || '').trim(),
-    }
-  }
-}
+/**
+ * How long each CLI-derived status stays fresh.
+ *
+ * These are all several seconds of process startup to produce, and none of
+ * them describes something that changes on a UI cadence: a node host service
+ * or a gateway endpoint stays put for the length of a session. The panels poll
+ * so an external change is eventually noticed, not because the value is
+ * volatile — so the poll reads cache and only occasionally pays for a spawn.
+ */
+const PROBE_TTL = {
+  /** Version/auth/mcp: fixed for the lifetime of an install. */
+  start: 30 * 60_000,
+  /** Node host service state — changes when the user starts/stops it. */
+  nodeStatus: 60_000,
+  /** Local gateway service state. */
+  gatewayStatus: 60_000,
+  /**
+   * Gateway reachability. Short on purpose: this one is only ever reached by
+   * the "Test Connection" button, and a button that says it is testing must
+   * actually test. The window exists to collapse a burst of clicks (or a
+   * second window) onto one invocation, not to answer from cache.
+   */
+  gatewayProbe: 5_000,
+} as const
 
 /**
- * Run the CLI without blocking the main thread.
- *
- * The synchronous variant freezes the entire Electron main process for the
- * duration — measured at ~3.5s even for `--version` — which stalls IPC, PTY
- * event forwarding, and rendering. Anything on a poll or triggered by a button
- * must use this instead.
+ * How long after the window exists before background warm-ups may spawn a CLI.
+ * Long enough for the first paint and the renderer's own startup traffic to be
+ * done, short enough that the data is there before anyone opens Settings.
  */
-function runCliAsync(
-  args: string[],
-  timeoutMs = 20000,
-  extraEnv: NodeJS.ProcessEnv = {},
-): Promise<{ ok: boolean; stdout: string; stderr: string }> {
-  const { execFile } = require('child_process')
-  const { command, args: full } = cliInvocation(args)
-  return new Promise((resolve) => {
-    execFile(
-      command,
-      full,
-      {
-        encoding: 'utf-8',
-        timeout: timeoutMs,
-        env: getCliEnv({ ...getCliRuntime().extraEnv, ...extraEnv }),
-        maxBuffer: 8 * 1024 * 1024,
-      },
-      (err: any, stdout: string, stderr: string) => {
-        resolve({
-          ok: !err,
-          stdout: String(stdout || '').trim(),
-          stderr: String(stderr || err?.message || '').trim(),
-        })
-      },
-    )
-  })
-}
-
-/** Async runner for a binary that is not the resolved CLI (e.g. clawhub). */
-function runBinAsync(
-  bin: string,
-  args: string[],
-  timeoutMs = 15000,
-): Promise<{ ok: boolean; stdout: string; stderr: string }> {
-  const { execFile } = require('child_process')
-  return new Promise((resolve) => {
-    execFile(
-      bin,
-      args,
-      { encoding: 'utf-8', timeout: timeoutMs, env: getCliEnv(), maxBuffer: 8 * 1024 * 1024 },
-      (err: any, stdout: string, stderr: string) => {
-        resolve({
-          ok: !err,
-          stdout: String(stdout || '').trim(),
-          stderr: String(stderr || err?.message || '').trim(),
-        })
-      },
-    )
-  })
-}
+const GATEWAY_WARM_DELAY_MS = 8000
 
 /**
  * Open a command in the platform's terminal.
@@ -523,10 +471,30 @@ function openclawConfigPath(): string {
   return join(homedir(), '.openclaw', 'openclaw.json')
 }
 
+/**
+ * Read openclaw.json, re-parsing only when it has actually changed on disk.
+ *
+ * `isRemoteGatewayMode()` and `resolveGatewayToken()` call this, and both sit
+ * on paths that run per gateway RPC and per status poll — so the uncached
+ * version re-read and re-parsed the file dozens of times a minute.
+ * `statSync` is cheap next to a read plus a JSON parse, and using mtime+size
+ * as the key means an edit by the CLI is still picked up on the next call.
+ */
+let configCache: { key: string; value: OpenclawConfig } | null = null
 function readOpenclawConfig(): OpenclawConfig {
   const path = openclawConfigPath()
-  const raw = readFileSync(path, 'utf-8')
-  return JSON.parse(raw)
+  const stat = statSync(path)
+  const key = `${stat.mtimeMs}:${stat.size}`
+  if (configCache && configCache.key === key) return configCache.value
+
+  const value = JSON.parse(readFileSync(path, 'utf-8')) as OpenclawConfig
+  configCache = { key, value }
+  return value
+}
+
+/** Forget the parsed config after we write it ourselves. */
+function invalidateOpenclawConfigCache(): void {
+  configCache = null
 }
 
 /**
@@ -542,6 +510,7 @@ function writeOpenclawConfig(config: OpenclawConfig): void {
   const tmp = `${path}.${process.pid}.tmp`
   writeFileSync(tmp, content, 'utf-8')
   renameSync(tmp, path)
+  invalidateOpenclawConfigCache()
 }
 
 // Native width is held constant *during* a session's animations — resizing per
@@ -958,51 +927,105 @@ ipcMain.on(IPC.SET_IGNORE_MOUSE_EVENTS, (event, ignore: boolean, options?: { for
 
 // ─── IPC Handlers (typed, strict) ───
 
-ipcMain.handle(IPC.START, async () => {
-  log('IPC START — fetching static CLI info')
-  const runtime = getCliRuntime()
-  const cliCommand = runtime.kind
-  log(`CLI runtime: ${runtime.label} (resolved=${runtime.resolved})`)
+/** The slice of START that costs a CLI spawn to learn. */
+interface CliStartFacts {
+  version: string
+  auth: { email?: string; subscriptionType?: string; authMethod?: string }
+  mcpServers: string[]
+  authSupported: boolean
+  mcpSupported: boolean
+}
 
-  const runCli = (args: string[]) => runCliSync(args, 5000)
+const START_PROBE_KEY = 'start-facts'
 
-  let version = 'unknown'
-  const shortVersion = runCli(['-v'])
-  if (shortVersion.ok && shortVersion.stdout) {
-    version = shortVersion.stdout
-  } else {
-    const longVersion = runCli(['--version'])
+const UNKNOWN_START_FACTS: CliStartFacts = {
+  version: 'unknown',
+  auth: {},
+  mcpServers: [],
+  authSupported: true,
+  mcpSupported: true,
+}
+
+/**
+ * Ask the CLI who it is, what it is signed in as, and which MCP servers it
+ * knows about.
+ *
+ * All three run concurrently (the spawn throttle caps how many actually
+ * overlap). `-v` answers in ~90ms while `auth status` and `mcp list` each load
+ * the CLI's full module graph, so serialising them — which is what the old
+ * synchronous implementation did — cost ~11s of wall clock for no reason.
+ */
+async function collectStartFacts(): Promise<CliStartFacts> {
+  const [shortVersion, authProbe, mcpProbe] = await Promise.all([
+    runCliAsync(['-v'], 15000),
+    runCliAsync(['auth', 'status'], 20000),
+    runCliAsync(['mcp', 'list'], 20000),
+  ])
+
+  let version = shortVersion.ok && shortVersion.stdout ? shortVersion.stdout : ''
+  if (!version) {
+    const longVersion = await runCliAsync(['--version'], 15000)
     if (longVersion.ok && longVersion.stdout) version = longVersion.stdout
   }
 
-  let auth: { email?: string; subscriptionType?: string; authMethod?: string } = {}
+  let auth: CliStartFacts['auth'] = {}
   let authSupported = true
-  const authProbe = runCli(['auth', 'status'])
   if (authProbe.ok) {
     try { auth = JSON.parse(authProbe.stdout) } catch {}
-  } else {
-    const unknownCmd = /unknown command|did you mean/i.test(authProbe.stderr) || /unknown command|did you mean/i.test(authProbe.stdout)
-    if (unknownCmd) authSupported = false
+  } else if (/unknown command|did you mean/i.test(authProbe.stderr + authProbe.stdout)) {
+    authSupported = false
   }
 
-  let mcpServers: string[] = []
-  const mcpProbe = runCli(['mcp', 'list'])
-  if (mcpProbe.ok && mcpProbe.stdout) {
-    mcpServers = mcpProbe.stdout.split('\n').filter(Boolean)
-  }
+  const mcpServers = mcpProbe.ok && mcpProbe.stdout ? mcpProbe.stdout.split('\n').filter(Boolean) : []
   const mcpSupported = mcpProbe.ok || !/unknown command|did you mean/i.test(mcpProbe.stderr + mcpProbe.stdout)
 
+  return { version: version || 'unknown', auth, mcpServers, authSupported, mcpSupported }
+}
+
+function buildStartPayload(facts: CliStartFacts) {
+  const runtime = getCliRuntime()
   return {
-    version,
-    auth,
-    mcpServers,
+    ...facts,
     projectPath: process.cwd(),
     homePath: homedir(),
     cliBinary: runtime.label,
-    cliCommand,
-    authSupported,
-    mcpSupported,
+    cliCommand: runtime.kind,
   }
+}
+
+/**
+ * Static CLI info for the renderer.
+ *
+ * This used to run three synchronous CLI invocations, freezing the main
+ * process — and with it every window, the tray, and all IPC — for the ~11s
+ * they took. It now answers from cache and refreshes behind the UI: the
+ * launcher paints immediately, and a first-ever run gets a second payload over
+ * START_INFO once the probes land.
+ */
+ipcMain.handle(IPC.START, async () => {
+  const runtime = getCliRuntime()
+  log(`IPC START — CLI runtime: ${runtime.label} (resolved=${runtime.resolved})`)
+
+  const cached = peekProbe<CliStartFacts>(START_PROBE_KEY)
+
+  // Nothing known yet (first launch, or the cache was cleared): let the probes
+  // run, but do not make the renderer wait on them.
+  if (!cached) {
+    void probe(START_PROBE_KEY, collectStartFacts, { ttlMs: PROBE_TTL.start, persist: true })
+      .then((facts) => broadcast(IPC.START_INFO, buildStartPayload(facts)))
+      .catch((err: any) => log(`START probe failed: ${err?.message}`))
+    return buildStartPayload(UNKNOWN_START_FACTS)
+  }
+
+  // Known values are served straight back; anything expired refreshes behind
+  // this response and arrives over START_INFO.
+  const facts = await probe(START_PROBE_KEY, collectStartFacts, {
+    ttlMs: PROBE_TTL.start,
+    persist: true,
+    staleWhileRevalidate: true,
+    onRefresh: (value) => broadcast(IPC.START_INFO, buildStartPayload(value as CliStartFacts)),
+  })
+  return buildStartPayload(facts)
 })
 
 ipcMain.handle(IPC.CREATE_TAB, () => {
@@ -2260,7 +2283,7 @@ function readNodeIdentity(): { nodeId: string | null; displayName: string | null
   }
 }
 
-ipcMain.handle(IPC.NODE_STATUS, async (): Promise<NodeHostStatus> => {
+async function readNodeStatus(): Promise<NodeHostStatus> {
   const identity = readNodeIdentity()
   const res = await runCliAsync(['node', 'status'], 20000)
   const text = `${res.stdout}\n${res.stderr}`
@@ -2282,7 +2305,18 @@ ipcMain.handle(IPC.NODE_STATUS, async (): Promise<NodeHostStatus> => {
     // which carries the gateway token in plaintext.
     raw: redactSecrets(text.trim()),
   }
-})
+}
+
+// `node status` costs ~7s of CLI startup. The panel polls it so an external
+// change is eventually picked up, so serve the cached answer and let the
+// refresh happen behind it rather than making every poll pay the spawn.
+ipcMain.handle(IPC.NODE_STATUS, () =>
+  probe('node-status', readNodeStatus, {
+    ttlMs: PROBE_TTL.nodeStatus,
+    staleWhileRevalidate: true,
+    onRefresh: (value) => broadcast(IPC.NODE_STATUS_UPDATE, value),
+  }),
+)
 
 ipcMain.handle(IPC.NODE_ACTION, async (_event, { action }: { action: NodeAction }) => {
   const allowed: NodeAction[] = ['install', 'start', 'stop', 'restart', 'uninstall']
@@ -2293,12 +2327,15 @@ ipcMain.handle(IPC.NODE_ACTION, async (_event, { action }: { action: NodeAction 
   // Service registration can take a while and may prompt for elevation, so
   // this must never run synchronously on the main thread.
   const res = await runCliAsync(['node', action], 60000)
+  // The action is exactly the thing the cached status describes — drop it so
+  // the refresh that follows reports the new state instead of the old one.
+  invalidateProbe('node-status')
   return res.ok
     ? { ok: true, output: redactSecrets(res.stdout) }
     : { ok: false, output: redactSecrets(res.stdout), error: redactSecrets(res.stderr) || `node ${action} failed` }
 })
 
-ipcMain.handle(IPC.GATEWAY_STATUS, async () => {
+async function readGatewayStatus() {
   const token = resolveGatewayToken()
   const res = await runCliAsync(['gateway', 'status'], 30000, token ? { OPENCLAW_GATEWAY_TOKEN: token } : {})
   const text = `${res.stdout}\n${res.stderr}`.trim()
@@ -2308,9 +2345,16 @@ ipcMain.handle(IPC.GATEWAY_STATUS, async () => {
     installed: !/Service unit not found|Service not installed/i.test(text),
     output: redactSecrets(text),
   }
-})
+}
 
-ipcMain.handle(IPC.GATEWAY_PROBE, async () => {
+ipcMain.handle(IPC.GATEWAY_STATUS, () =>
+  probe('gateway-status', readGatewayStatus, {
+    ttlMs: PROBE_TTL.gatewayStatus,
+    staleWhileRevalidate: true,
+  }),
+)
+
+async function readGatewayProbe() {
   const token = resolveGatewayToken()
   const res = await runCliAsync(['gateway', 'probe'], 45000, token ? { OPENCLAW_GATEWAY_TOKEN: token } : {})
   const text = `${res.stdout}\n${res.stderr}`.trim()
@@ -2324,7 +2368,11 @@ ipcMain.handle(IPC.GATEWAY_PROBE, async () => {
     missingOperatorScope: /missing scope:\s*operator/i.test(text),
     output: redactSecrets(text),
   }
-})
+}
+
+ipcMain.handle(IPC.GATEWAY_PROBE, () =>
+  probe('gateway-probe', readGatewayProbe, { ttlMs: PROBE_TTL.gatewayProbe }),
+)
 
 ipcMain.handle(IPC.GATEWAY_CONFIG_GET, async (): Promise<GatewayConfigView> => {
   let config: OpenclawConfig = {}
@@ -2391,6 +2439,10 @@ ipcMain.handle(
       }
 
       writeOpenclawConfig(config)
+      // Everything cached about the gateway described the old endpoint.
+      invalidateProbe('gateway-probe')
+      invalidateProbe('gateway-status')
+      invalidateGatewayModelCache()
       log(`Gateway config updated: mode=${config.gateway.mode} url=${config.gateway.remote?.url || '(unset)'}`)
       return { ok: true }
     } catch (err: any) {
@@ -2653,13 +2705,17 @@ app.whenReady().then(async () => {
     broadcast(IPC.SKILL_STATUS, status)
   }).catch((err: Error) => log(`Skill provisioning error: ${err.message}`))
 
-  // Warm the gateway model cache in the background. Each RPC is ~9s, so
-  // fetching it lazily means the first visit to Settings stares at empty
-  // dropdowns; doing it now means the data is usually already there.
+  // Warm the gateway model cache so the first visit to Settings is not staring
+  // at empty dropdowns. Deliberately *after* the window exists and with a
+  // delay: each RPC is a CLI spawn plus a network round trip, and running them
+  // during startup put two heavyweight processes directly against window
+  // creation and first paint.
   if (isRemoteGatewayMode()) {
-    fetchGatewayModelInfo()
-      .then((info) => log(info ? `Gateway model cache warmed (${info.providers.length} providers)` : 'Gateway model cache warm failed'))
-      .catch(() => log('Gateway model cache warm threw'))
+    setTimeout(() => {
+      fetchGatewayModelInfo()
+        .then((info) => log(info ? `Gateway model cache warmed (${info.providers.length} providers)` : 'Gateway model cache warm failed'))
+        .catch(() => log('Gateway model cache warm threw'))
+    }, GATEWAY_WARM_DELAY_MS)
   }
 
   createWindow()
@@ -2723,6 +2779,9 @@ app.whenReady().then(async () => {
 app.on('will-quit', () => {
   globalShortcut.unregisterAll()
   controlPlane.shutdown()
+  // Persist what we learned about the CLI so the next launch paints from it
+  // instead of re-probing.
+  flushProbeCache()
   flushLogs()
 })
 

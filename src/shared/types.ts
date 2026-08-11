@@ -423,6 +423,11 @@ export const IPC = {
   // Skill provisioning (main → renderer)
   SKILL_STATUS: 'clui:skill-status',
 
+  // Late-arriving half of START (main → renderer). START answers from cache so
+  // the launcher paints immediately; the CLI-derived fields follow on here once
+  // the probes behind them finish.
+  START_INFO: 'clui:start-info',
+
   // Theme
   GET_THEME: 'clui:get-theme',
   THEME_CHANGED: 'clui:theme-changed',
@@ -444,6 +449,8 @@ export const IPC = {
 
   // Node host + gateway management
   NODE_STATUS: 'clui:node-status',
+  /** Background refresh of a previously-served node status (main → renderer). */
+  NODE_STATUS_UPDATE: 'clui:node-status-update',
   NODE_ACTION: 'clui:node-action',
   GATEWAY_STATUS: 'clui:gateway-status',
   GATEWAY_PROBE: 'clui:gateway-probe',

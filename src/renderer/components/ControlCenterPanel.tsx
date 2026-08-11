@@ -157,6 +157,10 @@ function AgentsTab() {
   useEffect(() => {
     let cancelled = false
     const poll = async () => {
+      // The launcher spends most of its life parked off screen with background
+      // throttling disabled, so an unconditional 1Hz poll keeps main, IPC and
+      // React busy for a card nobody can see.
+      if (document.hidden) return
       try {
         const [metrics, health] = await Promise.all([
           window.clui.getRuntimeMetrics(),
@@ -736,23 +740,43 @@ function NodeHostCard({ colors, onLog }: { colors: Colors; onLog: (line: string)
     }
   }
 
-  // Self-scheduling rather than setInterval: each `node status` shells out to
-  // the CLI and takes seconds, so a fixed interval would overlap calls and
-  // queue them without bound. Re-arm only after the previous one settles.
+  /**
+   * How often to ask for node host status.
+   *
+   * The call itself is cached in main, so most of these are free — this is
+   * only how often a *stale* read is allowed to trigger a real `node status`
+   * spawn behind it. The old 15s loop fired a ~7s CLI process four times a
+   * minute for the entire time this panel was open, to watch a Windows service
+   * that changes only when the user presses one of the buttons below it.
+   */
+  const POLL_MS = 60_000
+
+  // Self-scheduling rather than setInterval: a cache miss shells out to the
+  // CLI and takes seconds, so a fixed interval would overlap calls and queue
+  // them without bound. Re-arm only after the previous one settles.
   useEffect(() => {
     aliveRef.current = true
     let timer: ReturnType<typeof setTimeout> | null = null
 
     const loop = async () => {
-      await refresh()
+      // A hidden launcher has no one looking at this card; skip the tick
+      // rather than keep a background poll alive against the CLI.
+      if (!document.hidden) await refresh()
       if (!aliveRef.current) return
-      timer = setTimeout(() => { void loop() }, 15000)
+      timer = setTimeout(() => { void loop() }, POLL_MS)
     }
     void loop()
+
+    // Main serves a stale value immediately and refreshes behind it, so the
+    // fresh answer arrives here rather than at the call site.
+    const unsub = window.clui.onNodeStatusUpdate((next) => {
+      if (aliveRef.current) setStatus(next)
+    })
 
     return () => {
       aliveRef.current = false
       if (timer) clearTimeout(timer)
+      unsub()
     }
   }, [])
 

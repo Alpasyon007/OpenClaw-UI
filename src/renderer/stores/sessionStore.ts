@@ -22,6 +22,20 @@ export function getModelDisplayLabel(modelId: string): string {
   return normalizedId
 }
 
+/** Guards against stacking a second onStartInfo listener on a re-init. */
+let startInfoSubscribed = false
+
+/**
+ * How often the app checks for a CLI update on its own.
+ *
+ * `update check` is a ~4s CLI spawn that also hits the network. Running it on
+ * every launch — which is what the old auto-call did — put a heavyweight
+ * process on the critical path of the launcher appearing, to answer a question
+ * whose answer changes maybe weekly. The "Check Update" button is unaffected.
+ */
+const UPDATE_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000
+const UPDATE_CHECK_STAMP_KEY = 'openclaw-last-update-check'
+
 // ─── Store ───
 
 interface StaticInfo {
@@ -76,6 +90,8 @@ interface State {
   refreshOpenclawModels: () => Promise<void>
   setOpenclawModel: (provider: string, model: string) => Promise<void>
   checkOpenclawUpdate: () => Promise<void>
+  /** Update check, but at most once a day. Cheap to call on every launch. */
+  maybeCheckOpenclawUpdate: () => Promise<void>
   runOpenclawUpgrade: () => Promise<void>
   setPermissionMode: (mode: 'ask' | 'auto') => void
   createTab: () => Promise<string>
@@ -222,8 +238,10 @@ export const useSessionStore = create<State>((set, get) => ({
   marketplaceFilter: 'All',
 
   initStaticInfo: async () => {
-    try {
-      const result = await window.clui.start()
+    // The CLI-derived half of this can arrive twice: once from cache when the
+    // handler answers, and again over onStartInfo after a background refresh.
+    // Both land here.
+    const apply = (result: Awaited<ReturnType<typeof window.clui.start>>) => {
       set({
         staticInfo: {
           version: result.version || 'unknown',
@@ -237,8 +255,16 @@ export const useSessionStore = create<State>((set, get) => ({
           mcpSupported: result.mcpSupported !== false,
         },
       })
+    }
+
+    if (!startInfoSubscribed) {
+      startInfoSubscribed = true
+      window.clui.onStartInfo(apply)
+    }
+
+    try {
+      apply(await window.clui.start())
       get().refreshOpenclawModels()
-      void get().checkOpenclawUpdate()
     } catch {}
   },
 
@@ -301,7 +327,15 @@ export const useSessionStore = create<State>((set, get) => ({
     }
   },
 
+  maybeCheckOpenclawUpdate: async () => {
+    const last = Number(localStorage.getItem(UPDATE_CHECK_STAMP_KEY) || 0)
+    if (Date.now() - last < UPDATE_CHECK_INTERVAL_MS) return
+    localStorage.setItem(UPDATE_CHECK_STAMP_KEY, String(Date.now()))
+    await get().checkOpenclawUpdate()
+  },
+
   checkOpenclawUpdate: async () => {
+    localStorage.setItem(UPDATE_CHECK_STAMP_KEY, String(Date.now()))
     set({ openclawUpdateBusy: true })
     try {
       const res = await window.clui.openclawRun('update_check')

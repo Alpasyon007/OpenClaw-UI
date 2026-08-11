@@ -112,6 +112,17 @@ export default function App() {
     })
   }, [])
 
+  // Update check: never on the launch path. It spawns the CLI (~4s) and hits
+  // the network, and the answer is the same all week — so let the launcher
+  // settle first, and let the store's own once-a-day throttle decide whether
+  // it runs at all.
+  useEffect(() => {
+    const t = setTimeout(() => {
+      void useSessionStore.getState().maybeCheckOpenclawUpdate()
+    }, 45_000)
+    return () => clearTimeout(t)
+  }, [])
+
   // Every time the launcher is shown again, start from chat-only mode.
   useEffect(() => {
     const unsubShown = window.clui.onWindowShown(() => {

@@ -4,19 +4,27 @@ import type { RunOptions, NormalizedEvent, HealthReport, EnrichedError, Attachme
 import type { ShortcutDef } from '../shared/shortcuts'
 import type { Theme } from '../shared/theme-types'
 
+export interface StartInfo {
+  version: string
+  auth: { email?: string; subscriptionType?: string; authMethod?: string }
+  mcpServers: string[]
+  projectPath: string
+  homePath: string
+  cliBinary: string
+  cliCommand: string
+  authSupported: boolean
+  mcpSupported: boolean
+}
+
 export interface CluiAPI {
   // ─── Request-response (renderer → main) ───
-  start(): Promise<{
-    version: string
-    auth: { email?: string; subscriptionType?: string; authMethod?: string }
-    mcpServers: string[]
-    projectPath: string
-    homePath: string
-    cliBinary: string
-    cliCommand: string
-    authSupported: boolean
-    mcpSupported: boolean
-  }>
+  /**
+   * Static CLI info. Answers from cache, so the fields the CLI has to be
+   * spawned for (version, auth, MCP list) may be placeholders on a first-ever
+   * launch — {@link CluiAPI.onStartInfo} delivers the real values when the
+   * probes behind them finish.
+   */
+  start(): Promise<StartInfo>
   createTab(): Promise<{ tabId: string }>
   prompt(tabId: string, requestId: string, options: RunOptions): Promise<void>
   cancel(requestId: string): Promise<boolean>
@@ -98,6 +106,10 @@ export interface CluiAPI {
   onTabStatusChange(callback: (tabId: string, newStatus: string, oldStatus: string) => void): () => void
   onError(callback: (tabId: string, error: EnrichedError) => void): () => void
   onSkillStatus(callback: (status: { name: string; state: string; error?: string; reason?: string }) => void): () => void
+  /** Fires when a background refresh produces fresher static CLI info. */
+  onStartInfo(callback: (info: StartInfo) => void): () => void
+  /** Fires when a background refresh produces a fresher node host status. */
+  onNodeStatusUpdate(callback: (status: NodeHostStatus) => void): () => void
   onWindowShown(callback: () => void): () => void
   /** main -> renderer: settle the DOM; the window is about to be revealed. */
   onWindowPrepare(callback: (generation: number) => void): () => void
@@ -214,6 +226,18 @@ const api: CluiAPI = {
     const handler = (_e: Electron.IpcRendererEvent, status: any) => callback(status)
     ipcRenderer.on(IPC.SKILL_STATUS, handler)
     return () => ipcRenderer.removeListener(IPC.SKILL_STATUS, handler)
+  },
+
+  onStartInfo: (callback) => {
+    const handler = (_e: Electron.IpcRendererEvent, info: StartInfo) => callback(info)
+    ipcRenderer.on(IPC.START_INFO, handler)
+    return () => ipcRenderer.removeListener(IPC.START_INFO, handler)
+  },
+
+  onNodeStatusUpdate: (callback) => {
+    const handler = (_e: Electron.IpcRendererEvent, status: NodeHostStatus) => callback(status)
+    ipcRenderer.on(IPC.NODE_STATUS_UPDATE, handler)
+    return () => ipcRenderer.removeListener(IPC.NODE_STATUS_UPDATE, handler)
   },
 
   onWindowShown: (callback) => {
