@@ -436,6 +436,18 @@ coco::stray start(saucer::application *app)
         }}.detach();
     };
 
+    // The page asking to be dismissed — Escape in the input bar.
+    //
+    // Dismissal is a window concern, so it belongs here rather than in the
+    // sidecar: the shim used to forward clui:hide-window to Node, which has no
+    // handler for it, so Escape reported "not implemented in sidecar" and the
+    // launcher stayed on screen.
+    //
+    // Routing it through the same `dismiss` the hotkey and tray use means the
+    // page gets the exit animation and the parking watchdog for free, instead
+    // of the window vanishing out from under a still-running animation.
+    view->expose("hide_window", [dismiss] { dismiss(); });
+
     // ─── Taskbar, tray and global shortcuts ───
     //
     // Electron gave all three for free (skipTaskbar, Tray, globalShortcut);

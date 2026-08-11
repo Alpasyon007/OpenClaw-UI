@@ -215,6 +215,16 @@
   // to the sidecar where it would be silently dropped.
   window.clui.setIgnoreMouseEvents = function () { /* shell owns this now */ };
 
+  // Dismissing the launcher is a window concern too. Forwarded to Node it was
+  // answered with "not implemented in sidecar", so Escape in the input bar did
+  // nothing. The shell runs the same dismiss path the hotkey and tray use, so
+  // the exit animation still plays before the window is parked.
+  window.clui.hideWindow = function () {
+    if (window.saucer && window.saucer.exposed && window.saucer.exposed.hide_window) {
+      window.saucer.exposed.hide_window();
+    }
+  };
+
   // Window-lifecycle acks belong to the shell, not the sidecar. Left on the
   // default path they would be forwarded to Node and dropped, and the summon
   // handshake would fall back to its timeout every time.
