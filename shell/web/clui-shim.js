@@ -247,6 +247,15 @@
   // the only methods whose implementation is split across both processes.
   var ex = function () { return (window.saucer && window.saucer.exposed) || {}; };
 
+  // The OS theme is the shell's to answer: Node has no registry API, so the
+  // sidecar replied with a hardcoded isDark:true and the app was permanently
+  // dark no matter what the user had set. The matching clui:theme-changed
+  // event is pushed by the shell when Windows broadcasts a colour change.
+  window.clui.getTheme = function () {
+    return Promise.resolve(ex().get_dark_mode ? ex().get_dark_mode() : true)
+      .then(function (isDark) { return { isDark: !!isDark }; });
+  };
+
   window.clui.selectDirectory = function () {
     return Promise.resolve(ex().pick_folder ? ex().pick_folder() : '').then(function (p) {
       return p || null;

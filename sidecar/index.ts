@@ -36,6 +36,10 @@ import { getCliRuntime, getAgentDataHomes, cliInvocation } from '../src/main/ope
 import { getCliEnv } from '../src/main/cli-env'
 import { fetchCatalog, listInstalled, installPlugin, uninstallPlugin } from '../src/main/marketplace/catalog'
 import { runCliAsync, probe, peekProbe, invalidateProbe, flushProbeCache } from '../src/main/cli-probe'
+import { ensureSkills } from '../src/main/skills/installer'
+
+/** How long after boot before skill provisioning may hit the network. */
+const SKILL_PROVISION_DELAY_MS = 10_000
 
 const log = (...a: unknown[]) => console.error('[sidecar]', ...a)
 
@@ -614,7 +618,12 @@ const handlers: Record<string, (args: any) => unknown | Promise<unknown>> = {
   // rejection with .catch(() => {}), so a missing channel here does not throw —
   // it just renders the whole launcher with no palette, which looks exactly
   // like the app failing to mount. Dark is the shell's default background.
-  [IPC.GET_THEME]: () => ({ isDark: true }),
+  // GET_THEME is deliberately absent. It used to answer a hardcoded
+  // `isDark: true`, which is why the app ignored the user's light/dark setting
+  // entirely. Node cannot read it — there is no registry API — so the shell
+  // owns both halves now: the shim routes clui.getTheme at an exposed
+  // get_dark_mode, and clui:theme-changed is pushed from the Win32 message
+  // loop when the OS broadcasts a colour change.
 
   // Cheap, self-contained channels the UI touches early. Each returns the same
   // shape the Electron handler did; none of them need a window.
@@ -1094,3 +1103,19 @@ void (async () => {
   // The shell waits for this before navigating, so the server is guaranteed up.
   emit('sidecar:ready', { nodeVersion: process.version, wired, total: all.length, webPort: WEB_PORT })  // single object arg, now safe
 }
+
+// ─── Skill provisioning ───
+//
+// The Electron main process ran this on startup; the port dropped it, so the
+// manifest's skills were never installed and clui:skill-status never fired.
+//
+// Deferred, because it downloads a tarball: doing it during boot puts a
+// network round trip against the first paint, and nothing in the UI is waiting
+// on the result. Failures are reported to the renderer and logged, never
+// thrown — a skill that will not install must not take the app down with it.
+setTimeout(() => {
+  void ensureSkills((status) => {
+    log(`skill ${status.name}: ${status.state}${status.error ? ` — ${status.error}` : ''}`)
+    emit(IPC.SKILL_STATUS, status)
+  }).catch((err) => log('skill provisioning failed:', err?.message ?? err))
+}, SKILL_PROVISION_DELAY_MS)

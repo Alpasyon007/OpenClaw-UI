@@ -80,6 +80,31 @@ namespace
         std::mutex mutex;
         std::vector<saucer::bounds> rects;
     };
+
+#ifdef _WIN32
+    /**
+     * Does the OS want dark application chrome?
+     *
+     * This is what Electron's nativeTheme.shouldUseDarkColors reported. The
+     * sidecar cannot answer it: Node has no registry API, so it would have to
+     * spawn reg.exe and poll. Reading it here is a single syscall and the shell
+     * already has the message loop needed to hear about changes.
+     *
+     * AppsUseLightTheme is absent on builds predating the personalisation
+     * split; Windows treats that as light, so default to false.
+     */
+    bool os_prefers_dark()
+    {
+        DWORD value = 1;
+        DWORD size  = sizeof(value);
+        const auto status =
+            RegGetValueW(HKEY_CURRENT_USER,
+                         L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
+                         L"AppsUseLightTheme", RRF_RT_REG_DWORD, nullptr, &value, &size);
+        if (status != ERROR_SUCCESS) return false;
+        return value == 0;
+    }
+#endif
 } // namespace
 
 coco::stray start(saucer::application *app)
@@ -436,6 +461,14 @@ coco::stray start(saucer::application *app)
         }}.detach();
     };
 
+    // ─── OS theme ───
+    //
+    // The sidecar answered GET_THEME with a hardcoded `isDark: true`, so the
+    // app was permanently dark and never noticed the user switching. Theme is
+    // an OS/window concern like the dialogs above, so the shell owns both
+    // halves: the current value on demand, and a push when it changes.
+    view->expose("get_dark_mode", [] { return os_prefers_dark(); });
+
     // The page asking to be dismissed — Escape in the input bar.
     //
     // Dismissal is a window concern, so it belongs here rather than in the
@@ -470,13 +503,21 @@ coco::stray start(saucer::application *app)
     // The tray icon and the hotkeys share one thread and one message loop:
     // RegisterHotKey delivers WM_HOTKEY to the registering thread, and
     // Shell_NotifyIcon needs a window to send its callbacks to.
-    std::thread{[summon, dismiss]
+    std::thread{[summon, dismiss, send_event]
                 {
                     static std::function<void()> do_summon = summon;
                     static std::function<void()> do_dismiss = dismiss;
                     // Read the shell's real state rather than tracking a guess:
                     // toggling via hotkey and tray alternately would otherwise
                     // desynchronise them and a click would appear to do nothing.
+
+                    // Last theme we told the page about, so a WM_SETTINGCHANGE
+                    // that is not about colours does not churn the renderer.
+                    // Windows broadcasts that message for a great many unrelated
+                    // settings.
+                    static std::function<void(std::string, std::string)> emit_event = send_event;
+                    static bool last_dark = os_prefers_dark();
+                    trace(std::string{"os theme at startup: "} + (last_dark ? "dark" : "light"));
 
                     constexpr UINT kTrayMsg = WM_APP + 1;
                     constexpr int kAltSpace = 1;
@@ -531,6 +572,35 @@ coco::stray start(saucer::application *app)
                             return 0;
                         }
 
+                        // Light/dark switch. Windows signals it by broadcasting
+                        // WM_SETTINGCHANGE with lParam "ImmersiveColorSet" — it
+                        // sends no value, so re-read the registry and only tell
+                        // the page when the answer actually moved.
+                        //
+                        // This is also why the host window below is top-level
+                        // rather than message-only: HWND_MESSAGE windows are
+                        // excluded from broadcasts and would never see this.
+                        if (msg == WM_SETTINGCHANGE)
+                        {
+                            const auto *area = reinterpret_cast<const wchar_t *>(lp);
+                            if (area && lstrcmpW(area, L"ImmersiveColorSet") == 0)
+                            {
+                                // Traced even when nothing moved: colour events
+                                // are rare, and the alternative is a silent path
+                                // that is impossible to tell apart from one that
+                                // never received the broadcast at all.
+                                const bool dark = os_prefers_dark();
+                                trace(std::string{"ImmersiveColorSet -> "} + (dark ? "dark" : "light") +
+                                      (dark == last_dark ? " (unchanged)" : " (changed)"));
+                                if (dark != last_dark)
+                                {
+                                    last_dark = dark;
+                                    emit_event("clui:theme-changed", dark ? "true" : "false");
+                                }
+                            }
+                            return 0;
+                        }
+
                         return DefWindowProcW(h, msg, wp, lp);
                     };
 
@@ -541,10 +611,14 @@ coco::stray start(saucer::application *app)
                     wc.lpszClassName = L"OpenClawTrayHost";
                     RegisterClassExW(&wc);
 
-                    // HWND_MESSAGE: invisible, never in the taskbar, exists only
-                    // to receive tray and hotkey messages.
-                    auto *host = CreateWindowExW(0, wc.lpszClassName, L"", 0, 0, 0, 0, 0, HWND_MESSAGE,
-                                                 nullptr, wc.hInstance, nullptr);
+                    // Top-level but never shown: it has no WS_VISIBLE and zero
+                    // size, and WS_EX_TOOLWINDOW keeps it out of the taskbar and
+                    // Alt-Tab. This used to be HWND_MESSAGE, which is tidier but
+                    // does not receive broadcast messages — and WM_SETTINGCHANGE,
+                    // the only notice Windows gives of a theme switch, is a
+                    // broadcast. Tray callbacks and hotkeys work either way.
+                    auto *host = CreateWindowExW(WS_EX_TOOLWINDOW, wc.lpszClassName, L"", 0, 0, 0, 0, 0,
+                                                 nullptr, nullptr, wc.hInstance, nullptr);
 
                     NOTIFYICONDATAW nid{};
                     nid.cbSize           = sizeof(nid);

@@ -11,13 +11,23 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, rmSync, cpSync } from 'fs'
 import { join, dirname } from 'path'
 import { homedir } from 'os'
-import { execSync } from 'child_process'
+import { exec } from 'child_process'
 import { randomUUID } from 'crypto'
 import { SKILLS, type SkillEntry } from './manifest'
 import { getPrimaryAgentHome } from '../openclaw/runtime'
 
-/** Directory containing bundled skill sources (relative to main process __dirname) */
-const BUNDLED_SKILLS_DIR = join(__dirname, '../../skills')
+/**
+ * Directory holding bundled skill sources, i.e. ones we ship rather than
+ * download. Resolved next to the running bundle: under the saucer layout that
+ * is `<install>/sidecar/skills`. The path used to be `__dirname/../../skills`,
+ * which pointed outside the install root once the Electron `dist/main` layout
+ * went away.
+ *
+ * Nothing in the manifest is `bundled` today, so this is unexercised — but a
+ * wrong path here fails as "Bundled skill source not found", which reads like
+ * a packaging bug rather than a stale constant.
+ */
+const BUNDLED_SKILLS_DIR = join(__dirname, 'skills')
 
 const SKILLS_DIR = join(getPrimaryAgentHome(), 'skills')
 const VERSION_FILE = '.clui-version'
@@ -95,14 +105,21 @@ async function installGithubSkill(
     const pathDepth = path.split('/').length + 1 // +1 for the github top-level dir
     const tarballUrl = `https://api.github.com/repos/${repo}/tarball/${commitSha}`
 
-    // Use curl + tar — both always available on macOS
+    // curl and tar ship with macOS and with Windows 10 1803+.
+    //
+    // Asynchronous, and that is not cosmetic: this runs in the sidecar, whose
+    // stdout carries the entire NDJSON protocol. A synchronous 60s download
+    // blocks the event loop and with it every channel the renderer depends on,
+    // so provisioning a skill would freeze the whole app.
     const cmd = [
       `curl -sL "${tarballUrl}"`,
       '|',
       `tar -xz --strip-components=${pathDepth} -C "${tmpDir}" "*/${path}"`,
     ].join(' ')
 
-    execSync(cmd, { timeout: 60000, stdio: 'pipe' })
+    await new Promise<void>((resolve, reject) => {
+      exec(cmd, { timeout: 60000, windowsHide: true }, (err) => (err ? reject(err) : resolve()))
+    })
 
     // Validate extracted files
     onStatus({ name: entry.name, state: 'validating' })
