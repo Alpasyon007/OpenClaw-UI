@@ -23,8 +23,18 @@ jobs:
       - name: Install deps
         run: npm ci
 
-      - name: Build
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Build renderer
         run: npm run build
 
-      - name: Package Windows (portable)
-        run: npm run dist:win
+      # The C++ shell needs CMake, the saucer dependencies and WebView2, so the
+      # full `npm run dist` is not run here. These two cover everything that is
+      # JavaScript: the generated bridge must stay in step with the contract,
+      # and the sidecar must actually bundle.
+      - name: Generate clui shim
+        run: npm run shim
+
+      - name: Bundle sidecar
+        run: npm run sidecar

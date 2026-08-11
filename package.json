@@ -11,72 +11,32 @@
     "url": "https://github.com/MuhammadDaudNasir/OpenClaw-UI/issues"
   },
   "homepage": "https://github.com/MuhammadDaudNasir/OpenClaw-UI#readme",
-  "main": "dist/main/index.js",
   "scripts": {
     "bootstrap": "bash ./commands/bootstrap.command",
     "deploy": "bash ./commands/deploy.command",
-    "dev": "electron-vite dev",
-    "build": "electron-vite build",
-    "preview": "electron-vite preview",
-    "dist": "npm run dist:mac",
-    "dist:mac": "electron-vite build --mode production && electron-builder --mac --dir",
-    "dist:win": "electron-vite build --mode production && electron-builder --win --dir",
+    "build": "vite build",
+    "dev": "vite",
+    "preview": "vite preview",
+    "shim": "node sidecar/gen-shim.mjs src/shared/clui-contract.ts src/shared/types.ts shell/web/clui-shim.js",
+    "sidecar": "esbuild sidecar/index.ts --bundle --platform=node --format=cjs --target=node22 --external:node-pty --minify --outfile=shell/sidecar/main.cjs",
+    "dist": "node build-release.mjs",
+    "dist:web": "node build-release.mjs --web",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
     "doctor": "bash scripts/doctor.sh",
-    "setup:git": "bash ./commands/setup-git.command",
-    "postinstall": "node scripts/postinstall.js"
+    "setup:git": "bash ./commands/setup-git.command"
   },
   "dependencies": {
     "node-pty": "^1.1.0"
   },
-  "build": {
-    "appId": "com.openclaw.ui",
-    "productName": "OpenClaw UI",
-    "npmRebuild": false,
-    "directories": {
-      "output": "release"
-    },
-    "files": [
-      "dist/main/**/*",
-      "dist/preload/**/*",
-      "dist/renderer/**/*",
-      "resources/**/*",
-      "package.json",
-      "!node_modules/node-pty/prebuilds/${/*}",
-      "node_modules/node-pty/prebuilds/win32-x64/**",
-      "!node_modules/node-pty/third_party/conpty/*/win10-arm64/**"
-    ],
-    "mac": {
-      "icon": "resources/icon.png",
-      "entitlements": "resources/entitlements.mac.plist",
-      "entitlementsInherit": "resources/entitlements.mac.plist",
-      "extendInfo": {
-        "NSMicrophoneUsageDescription": "OpenClaw UI uses your microphone to transcribe voice input locally with Whisper."
-      }
-    },
-    "win": {
-      "target": [
-        {
-          "target": "portable",
-          "arch": [
-            "x64"
-          ]
-        }
-      ]
-    },
-    "electronLanguages": [
-      "en-US"
-    ]
-  },
   "devDependencies": {
     "@phosphor-icons/react": "^2.1.10",
     "@tailwindcss/vite": "^4.2.1",
+    "@types/node": "^22.10.0",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
     "@vitejs/plugin-react": "^4.3.0",
     "autoprefixer": "^10.4.0",
-    "electron": "^35.7.5",
-    "electron-builder": "^26.8.1",
-    "electron-vite": "^3.0.0",
+    "esbuild": "^0.25.0",
     "framer-motion": "^12.35.1",
     "postcss": "^8.4.0",
     "react": "^19.0.0",

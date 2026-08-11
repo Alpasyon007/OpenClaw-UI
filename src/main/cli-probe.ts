@@ -1,6 +1,5 @@
-import { app } from 'electron'
 import { execFile } from 'child_process'
-import { constants as osConstants, setPriority } from 'os'
+import { constants as osConstants, homedir, setPriority } from 'os'
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'fs'
 import { dirname, join } from 'path'
 import { cliInvocation, getCliRuntime } from './openclaw/runtime'
@@ -141,8 +140,26 @@ let diskLoaded = false
 let diskDirty = false
 let flushTimer: ReturnType<typeof setTimeout> | null = null
 
+/**
+ * Per-user application data directory.
+ *
+ * Stands in for what Electron's `app.getPath('userData')` returned. The
+ * sidecar is a plain Node process with no Electron to ask, so resolve the
+ * platform convention directly rather than dropping another dotfile in the
+ * home directory.
+ */
+function appDataDir(): string {
+  if (process.platform === 'win32') {
+    return join(process.env.LOCALAPPDATA || join(homedir(), 'AppData', 'Local'), 'openclaw-ui')
+  }
+  if (process.platform === 'darwin') {
+    return join(homedir(), 'Library', 'Application Support', 'openclaw-ui')
+  }
+  return join(process.env.XDG_CACHE_HOME || join(homedir(), '.cache'), 'openclaw-ui')
+}
+
 function cacheFile(): string {
-  return join(app.getPath('userData'), 'probe-cache.json')
+  return join(appDataDir(), 'probe-cache.json')
 }
 
 function loadDisk(): void {

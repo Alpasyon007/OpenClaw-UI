@@ -12,6 +12,6 @@
     "declaration": true,
     "jsx": "react-jsx"
   },
-  "include": ["src/**/*"],
-  "exclude": ["node_modules", "dist"]
+  "include": ["src/**/*", "sidecar/**/*", "vite.config.ts"],
+  "exclude": ["node_modules", "dist", "release", "shell"]
 }

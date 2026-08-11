@@ -4,35 +4,24 @@ set -euo pipefail
 # Resolve to repo root (one level up from commands/)
 cd "$(dirname "$0")/.."
 
-MODE="dev"
-RUN_AFTER_BOOTSTRAP=0
-
 usage() {
   cat <<'USAGE'
 OpenClaw UI Bootstrap
 
 Usage:
-  ./commands/bootstrap.command [--dev|--app] [--run]
+  ./commands/bootstrap.command
+
+Sets up the environment and builds the renderer. Packaging the full app
+(renderer + shim + sidecar + C++ shell) is `npm run dist`, which needs CMake
+and a C++ toolchain.
 
 Options:
-  --dev   Set up + build from source (default)
-  --app   Run full macOS app installer (/Applications)
-  --run   Start from source after successful bootstrap (dev mode only)
   -h, --help
 USAGE
 }
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --dev)
-      MODE="dev"
-      ;;
-    --app)
-      MODE="app"
-      ;;
-    --run)
-      RUN_AFTER_BOOTSTRAP=1
-      ;;
     -h|--help)
       usage
       exit 0
@@ -51,15 +40,6 @@ echo "OpenClaw UI Bootstrap"
 echo "====================="
 echo
 
-if [[ "$MODE" == "app" ]]; then
-  echo "Mode: macOS app install"
-  echo
-  ./commands/install-app.command
-  exit 0
-fi
-
-echo "Mode: developer/source install"
-echo
 echo "Step 1/3: Environment setup"
 if ! ./commands/setup.command; then
   if [[ -d "node_modules" ]]; then
@@ -84,10 +64,4 @@ npm run doctor || true
 
 echo
 echo "Bootstrap complete."
-echo "Run: ./commands/start.command"
-
-if [[ "$RUN_AFTER_BOOTSTRAP" == "1" ]]; then
-  echo
-  echo "Starting OpenClaw UI..."
-  ./commands/start.command
-fi
+echo "Run: npm run dist    (renderer + shim + sidecar + C++ shell -> release/)"

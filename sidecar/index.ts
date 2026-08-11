@@ -140,7 +140,11 @@ controlPlane.on('error', (tabId: string, error: unknown) => {
 })
 
 type OpenclawConfig = {
-  gateway?: { mode?: string; bind?: string; remote?: { enabled?: boolean; url?: string; token?: { id?: string } } }
+  gateway?: {
+    mode?: string
+    bind?: string
+    remote?: { enabled?: boolean; url?: string; token?: { source?: string; provider?: string; id?: string } }
+  }
 }
 
 /** Read ~/.openclaw/openclaw.json. Never throws; a missing file is just {}. */
@@ -506,8 +510,12 @@ const handlers: Record<string, (args: any) => unknown | Promise<unknown>> = {
   // ── Marketplace: the real catalog module, now Electron-free ──
   [IPC.MARKETPLACE_FETCH]: ({ forceRefresh }: any) => fetchCatalog(forceRefresh),
   [IPC.MARKETPLACE_INSTALLED]: () => listInstalled(),
-  [IPC.MARKETPLACE_INSTALL]: (a: any) => installPlugin(a),
-  [IPC.MARKETPLACE_UNINSTALL]: (a: any) => uninstallPlugin(a),
+  // Both take positional arguments, not the renderer's payload object. Passing
+  // the object straight through made every install fail its own input
+  // validation with an unhelpful message.
+  [IPC.MARKETPLACE_INSTALL]: ({ repo, pluginName, marketplace, sourcePath, isSkillMd }: any) =>
+    installPlugin(repo, pluginName, marketplace, sourcePath, isSkillMd),
+  [IPC.MARKETPLACE_UNINSTALL]: ({ pluginName }: any) => uninstallPlugin(pluginName),
 
   // ── CLI-backed channels ──
   [IPC.OPENCLAW_HEALTH]: () => runCli(['doctor'], 20000),

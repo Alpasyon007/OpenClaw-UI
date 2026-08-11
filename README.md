@@ -34,138 +34,90 @@ A lightweight,  desktop overlay for OpenClaw. This fork focuses on one-command d
 ## How It Works
 
 ```
-UI prompt → Main process spawns openclaw tui --message
+UI prompt → Node sidecar spawns openclaw tui --message
         → PTY stream parser → live render
         → tool call? → permission UI given to the user → approve/deny
 ```
 
+The desktop shell is a small C++ [saucer](https://github.com/saucer/saucer) app
+that owns the window layer — frameless, transparent, always-on-top, tray icon,
+global hotkeys and cursor hit-testing for click-through. Everything else runs in
+a Node sidecar it speaks to over NDJSON on stdio, and the UI is the same React
+bundle served to the webview over loopback.
+
 See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the full deep-dive.
 
-## Primary Install (One-Liner)
+## Build From Source
 
-Remote one-liner installer (installs OpenClaw UI into `/Applications' on mac)
+Windows is the supported platform today — the shell targets WebView2 and the
+node host integrates with a Scheduled Task.
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/MuhammadDaudNasir/OpenClaw-UI/main/install.sh | bash
-```
-This install currently works for MacOS only. :)
-After install, users can launch **OpenClaw UI** directly from Applications/Spotlight without Terminal.
-
-## Local Deploy (Alternative)
-
-From repo root:
-
-```bash
-./deploy.command
-```
-
-What it does: setup + dependency install + build + doctor + run.
-
-Other deploy modes:
-
-```bash
-# Deploy to /Applications as a standalone app
-./deploy.command --app
-```
-
-```bash
-# Setup/build only, don't auto-run
-./deploy.command --no-run
-```
-
-**1) Clone the repo**
+**Prerequisites:** Node 20+, CMake 3.21+, and a C++20 toolchain (MSVC via
+Visual Studio Build Tools). WebView2 ships with Windows 11.
 
 ```bash
 git clone https://github.com/MuhammadDaudNasir/OpenClaw-UI.git
 ```
 
-**2) Double-click `install-app.command`**
+```bash
+cd OpenClaw-UI && npm install
+```
 
-Open the project folder in Finder and double-click `install-app.command`.
+```bash
+npm run dist
+```
 
-> **First launch:** macOS may block the app because it's unsigned. Go to **System Settings → Privacy & Security → Open Anyway**. You only need to do this once.
-> **Folder cleanup:** the installer removes temporary `dist/` and `release/` folders after a successful install to keep the repo tidy.
+That runs the whole chain — renderer, generated bridge, sidecar bundle, then the
+C++ shell — and stages a self-contained folder in `release/`. The first run also
+configures CMake, which fetches saucer and takes a few minutes.
+
+> Press **⌥ + Space** to show/hide the overlay. If another app claims that combo,
+> use **Cmd/Ctrl+Shift+K**.
 
 <p align="center"><img src="docs/shortcut.png" width="520" alt="Press Option + Space to show or hide OpenClaw UI" /></p>
 
-After the initial install, just open **OpenClaw UI** from your Applications folder or Spotlight.
-
 <details>
-<summary><strong>Terminal / Developer Commands</strong></summary>
+<summary><strong>Developer Commands</strong></summary>
 
-Only `install-app.command` is kept at root intentionally for non-technical users. Developer scripts live in `commands/`.
-
-### Quick Start (Terminal)
-
-```bash
-git clone https://github.com/MuhammadDaudNasir/OpenClaw-UI.git
-```
-
-```bash
-cd OpenClaw-UI
-```
-
-```bash
-./commands/bootstrap.command
-```
-
-```bash
-./commands/start.command
-```
-
-> Press **⌥ + Space** to show/hide the overlay. If your macOS input source claims that combo which it shouldnt do lol, use **Cmd+Shift+K**.
-
-To stop:
-
-```bash
-./commands/stop.command
-```
-
-### Fast Install Modes
-
-```bash
-# Setup + build + doctor (source/dev workflow)
-./commands/bootstrap.command
-```
-
-```bash
-# Install standalone app to /Applications
-./commands/bootstrap.command --app
-```
-
-```bash
-# Setup + build + auto-run from source
-./commands/bootstrap.command --run
-```
-
-### Developer Workflow
-
-```bash
-npm install
-```
+### Working on the UI only
 
 ```bash
 npm run dev
 ```
 
-Renderer changes update instantly. Main-process changes require restarting `npm run dev`.
+Plain Vite dev server with hot reload. `window.clui` is not present there, so
+anything that talks to the backend is inert — it is for layout and styling work.
 
-### Other Commands
+### Working on the backend
+
+```bash
+npm run dist:web
+```
+
+Rebuilds everything except the C++ shell — renderer, bridge and sidecar — which
+is all you need unless you changed `shell/src`. Needs no C++ toolchain.
+
+### Command reference
 
 | Command | Purpose |
 |---------|---------|
-| `curl -fsSL https://raw.githubusercontent.com/MuhammadDaudNasir/OpenClaw-UI/main/install.sh | bash` | One-liner remote install to `/Applications` |
-| `./deploy.command` | One command deploy (setup + build + run) |
-| `./commands/bootstrap.command` | One-command setup/build (supports `--app` and `--run`) |
-| `./commands/deploy.command` | Deploy entrypoint (`--app`, `--no-run`) |
-| `./commands/setup.command` | Environment check + install dependencies |
-| `./commands/start.command` | Build and launch from source |
-| `./commands/stop.command` | Stop all OpenClaw UI processes |
+| `npm run dist` | Full build → `release/` (needs CMake + C++ toolchain) |
+| `npm run dist:web` | Everything except the C++ shell |
+| `npm run build` | Renderer bundle only → `dist/renderer` |
+| `npm run shim` | Regenerate `window.clui` from the contract |
+| `npm run sidecar` | Bundle the Node sidecar → `shell/sidecar/main.cjs` |
+| `npm run typecheck` | `tsc --noEmit` across `src/` and `sidecar/` |
+| `npm run doctor` | Environment diagnostic |
+| `./commands/bootstrap.command` | Environment check + install + renderer build |
 | `./commands/setup-git.command --origin <url>` | Set your GitHub remote for this fork |
-| `npm run build` | Production build (no packaging) |
-| `npm run dist` | Package as macOS `.app` into `release/` |
-| `npm run dist:win` | Package Windows portable build into `release/` |
-| `npm run doctor` | Run environment diagnostic |
+
+### The bridge contract
+
+`window.clui` is **generated**, not hand-written. `src/shared/clui-contract.ts`
+declares every channel; `sidecar/gen-shim.mjs` reads it and emits
+`shell/web/clui-shim.js`. Add a method to the contract and run `npm run shim` —
+if the channel is not in `src/shared/types.ts`, generation fails loudly rather
+than shipping a bridge that silently resolves to `undefined`.
 
 </details>
 
@@ -180,19 +132,21 @@ git push -u origin $(git rev-parse --abbrev-ref HEAD)
 
 Full guide: [`docs/GITHUB_SETUP.md`](docs/GITHUB_SETUP.md)
 
-## Windows Build (Experimental)
+## Platform Status
 
-Windows packaging is now supported without changing the macOS path.
+Windows is the platform the saucer shell currently targets: WebView2 for the
+webview, ConPTY for the agent transport, and a Scheduled Task for the node host.
 
-```bash
-npm run dist:win
-```
+macOS and Linux are not built yet. saucer itself is cross-platform (WebKit on
+both), so the gap is in `shell/src` — the tray, hotkey and click-through paths
+are written against Win32. Nothing in the sidecar or the renderer is
+Windows-specific.
 
-This creates Windows artifacts in `release/` (portable target).
+CI (`.github/workflows/windows-smoke.yml`) runs the typecheck, the renderer
+build, bridge generation and the sidecar bundle on `windows-latest`. It does not
+build the C++ shell.
 
 Detailed guide: [`docs/WINDOWS.md`](docs/WINDOWS.md)
-
-To improve confidence without a local Windows PC, this repo now includes a GitHub Actions workflow that runs `npm run build` and `npm run dist:win` on `windows-latest`. but currently doesnt work
 
 <details>
 <summary><strong>Setup Prerequisites (Detailed)</strong></summary>
@@ -254,20 +208,33 @@ brew install whisper-cpp
 ### Project Structure
 
 ```
+shell/                      # C++ saucer app — owns the window layer
+├── src/main.cpp            # Window, tray, hotkeys, click-through hit-testing
+├── src/sidecar.hpp         # Spawns Node, duplex NDJSON over stdio
+├── src/native_ui.hpp       # File dialogs + screen capture (needs an HWND)
+├── web/                    # Built renderer + generated clui-shim.js
+└── CMakeLists.txt
+
+sidecar/                    # Node backend — everything that is not the window
+├── index.ts                # Channel table; imports the modules below
+└── gen-shim.mjs            # Emits shell/web/clui-shim.js from the contract
+
 src/
-├── main/                   # Electron main process
-│   ├── claude/             # ControlPlane, RunManager, EventNormalizer
+├── main/                   # Backend modules, shared with the sidecar
+│   ├── claude/             # ControlPlane, RunManagers, EventNormalizer
 │   ├── hooks/              # PermissionServer (PreToolUse HTTP hooks)
 │   ├── marketplace/        # Plugin catalog fetching + install
 │   ├── skills/             # Skill auto-installer
-│   └── index.ts            # Window creation, IPC handlers, tray
+│   ├── cli-probe.ts        # Throttled + cached CLI probing
+│   └── openclaw/runtime.ts # Locates and invokes the CLI
 ├── renderer/               # React frontend
 │   ├── components/         # TabStrip, ConversationView, InputBar, etc.
 │   ├── stores/             # Zustand session store
 │   ├── hooks/              # Event listeners, health reconciliation
 │   └── theme.ts            # Dual palette + CSS custom properties
-├── preload/                # Secure IPC bridge (window.clui API)
-└── shared/                 # Canonical types, IPC channel definitions
+└── shared/
+    ├── types.ts            # Canonical types, IPC channel definitions
+    └── clui-contract.ts    # The window.clui contract the shim is generated from
 ```
 
 ### How It Works
@@ -306,15 +273,14 @@ npm run doctor
 
 | Component | Version |
 |-----------|---------|
-| macOS | 15.x (Sequoia) |
-| Node.js | 20.x LTS, 22.x |
-| Python | 3.12 (with setuptools installed) |
-| Electron | 33.x |
-| OpenClaw CLI | 2.1.71 |
+| Windows | 11 (WebView2) |
+| Node.js | 20.x LTS, 22.x, 24.x |
+| CMake | 3.21+ with MSVC (C++20) |
+| OpenClaw CLI | 2026.7.x |
 
 ## Known Limitations
 
-- **macOS is primary** — full overlay/tray behavior is tuned for macOS. Windows builds are supported in experimental mode via `npm run dist:win`.
+- **Windows only for now** — the saucer shell's tray, hotkey and click-through paths are written against Win32. See [Platform Status](#platform-status).
 - **Requires OpenClaw CLI** — OpenClaw UI is a UI layer, not a standalone AI client. You need an authenticated `openclaw` CLI.
 - **Permission mode** — OpenClaw runs through PTY/TUI transport so approvals and tool execution remain interactive.
 

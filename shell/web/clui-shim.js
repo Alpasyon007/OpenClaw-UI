@@ -4,7 +4,7 @@
 // bridge, so the renderer bundle runs unmodified. Loaded as a classic script
 // before the app module, because window.clui must exist before React mounts.
 //
-// Derived from src/preload/index.ts: 46 invoke, 12 send, 9 subscription methods.
+// Derived from src/shared/clui-contract.ts: 46 invoke, 12 send, 11 subscription methods.
 (function () {
   // saucer's exposed functions are not installed yet when this classic script
   // runs, so buffer and flush. Losing the boot log to a swallowed exception is
@@ -159,6 +159,8 @@
     onTabStatusChange: function (callback) { return on("clui:tab-status-change", callback); },
     onError: function (callback) { return on("clui:enriched-error", callback); },
     onSkillStatus: function (callback) { return on("clui:skill-status", callback); },
+    onStartInfo: function (callback) { return on("clui:start-info", callback); },
+    onNodeStatusUpdate: function (callback) { return on("clui:node-status-update", callback); },
     onWindowShown: function (callback) { return on("clui:window-shown", callback); },
     onWindowPrepare: function (callback) { return on("clui:window-prepare", callback); },
     onWindowDismiss: function (callback) { return on("clui:window-dismiss", callback); },
@@ -280,7 +282,7 @@
   };
 
   // Diagnostics the shell reads back out.
-  window.clui.__meta = { invokes: 46, sends: 12, events: 9 };
+  window.clui.__meta = { invokes: 46, sends: 12, events: 11 };
   shellLog('clui shim installed: ' + JSON.stringify(window.clui.__meta));
   window.addEventListener('DOMContentLoaded', function () {
     shellLog('DOMContentLoaded; root children=' + (document.getElementById('root') || {}).childElementCount);

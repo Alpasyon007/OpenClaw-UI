@@ -170,35 +170,8 @@ if ! npm install; then
   exit 1
 fi
 
-# Guard against stale lockfiles/dependency trees that keep vulnerable versions.
-installed_builder=$(node -p "require('./node_modules/electron-builder/package.json').version" 2>/dev/null || echo "")
-installed_electron=$(node -p "require('./node_modules/electron/package.json').version" 2>/dev/null || echo "")
-
-if [ -z "$installed_builder" ] || [ -z "$installed_electron" ]; then
-  echo
-  echo "Could not verify installed Electron dependencies."
-  echo "Try:"
-  echo "  rm -rf node_modules package-lock.json"
-  echo "  npm install"
-  echo "  ./commands/setup.command"
-  echo
-  exit 1
-fi
-
-if ! version_gte "$installed_builder" "26.8.1" || ! version_gte "$installed_electron" "35.7.5"; then
-  echo
-  echo "Detected outdated install (electron-builder $installed_builder, electron $installed_electron)."
-  echo "Applying required security baseline..."
-  echo
-  npm install -D electron-builder@^26.8.1 electron@^35.7.5
-fi
-
-final_builder=$(node -p "require('./node_modules/electron-builder/package.json').version" 2>/dev/null || echo "")
-final_electron=$(node -p "require('./node_modules/electron/package.json').version" 2>/dev/null || echo "")
-echo "Installed: electron-builder $final_builder, electron $final_electron"
-
 echo
-echo "Setup complete. To launch the app, run:"
+echo "Setup complete. To build the app, run:"
 echo
-echo "  ./commands/start.command"
+echo "  npm run dist"
 echo

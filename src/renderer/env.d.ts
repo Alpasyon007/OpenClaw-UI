@@ -1,4 +1,4 @@
-import type { CluiAPI } from '../preload/index'
+import type { CluiAPI } from '../shared/clui-contract'
 
 declare module '*.mp3' {
   const src: string
@@ -13,9 +13,9 @@ declare global {
 
 declare global {
   interface Window {
-    /** Diagnostic flag set by the preload when window tracing is enabled. */
+    /** Diagnostic flag — window tracing. Unset unless the shell installs it. */
     __cluiTraceShell?: boolean
-    /** Diagnostic flag set by the preload when CLUI_NO_ANIM=1 — all animation off. */
+    /** Diagnostic flag — when true, all animation is off. */
     __cluiNoAnim?: boolean
   }
 }
