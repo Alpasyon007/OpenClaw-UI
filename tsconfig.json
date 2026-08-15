@@ -10,8 +10,11 @@
     "resolveJsonModule": true,
     "isolatedModules": true,
     "declaration": true,
-    "jsx": "react-jsx"
+    "jsx": "react-jsx",
+    // `globals: true` in vitest.config.ts puts describe/it/expect in scope
+    // without an import; without this they are unresolved identifiers.
+    "types": ["node", "vitest/globals"]
   },
-  "include": ["src/**/*", "sidecar/**/*", "vite.config.ts"],
-  "exclude": ["node_modules", "dist", "release", "shell"]
+  "include": ["src/**/*", "sidecar/**/*", "tests/**/*", "vite.config.ts", "vitest.config.ts"],
+  "exclude": ["node_modules", "dist", "release", "shell", "reports"]
 }

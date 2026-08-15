@@ -1,13 +1,13 @@
-import { spawn, execSync, ChildProcess } from 'child_process'
+import { spawn, ChildProcess } from 'child_process'
 import { EventEmitter } from 'events'
 import { homedir } from 'os'
-import { join, delimiter } from 'path'
+import { delimiter } from 'path'
 import { StreamParser } from '../stream-parser'
 import { normalize } from './event-normalizer'
 import { log as _log } from '../logger'
 import { getCliEnv } from '../cli-env'
 import { getCliRuntime, type CliRuntime } from '../openclaw/runtime'
-import type { ClaudeEvent, NormalizedEvent, RunOptions, EnrichedError } from '../../shared/types'
+import type { ClaudeEvent, RunOptions, EnrichedError } from '../../shared/types'
 
 const MAX_RING_LINES = 100
 const DEBUG = process.env.CLUI_DEBUG === '1'
@@ -197,7 +197,7 @@ export class RunManager extends EventEmitter {
     }
 
     // ─── stdout → NDJSON parser → normalizer → events ───
-    const parser = StreamParser.fromStream(child.stdout!)
+    const parser = StreamParser.fromStream(child.stdout)
 
     parser.on('event', (raw: ClaudeEvent) => {
       // Track session ID
@@ -289,7 +289,7 @@ export class RunManager extends EventEmitter {
         content: [{ type: 'text', text: options.prompt }],
       },
     })
-    child.stdin!.write(userMessage + '\n')
+    child.stdin.write(userMessage + '\n')
 
     this.activeRuns.set(requestId, handle)
     return handle

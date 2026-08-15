@@ -1,5 +1,6 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react'
 import { createPortal } from 'react-dom'
+import { useShallow } from 'zustand/react/shallow'
 import { motion } from 'framer-motion'
 import { Clock, ChatCircle } from '@phosphor-icons/react'
 import { useSessionStore } from '../stores/sessionStore'
@@ -8,7 +9,10 @@ import { useColors } from '../theme'
 import type { SessionMeta } from '../../shared/types'
 
 function formatTimeAgo(isoDate: string): string {
-  const diff = Date.now() - new Date(isoDate).getTime()
+  const parsed = new Date(isoDate).getTime()
+  // An absent or unparseable timestamp rendered as "NaNm ago".
+  if (!Number.isFinite(parsed)) return ''
+  const diff = Date.now() - parsed
   const mins = Math.floor(diff / 60000)
   if (mins < 1) return 'just now'
   if (mins < 60) return `${mins}m ago`
@@ -20,6 +24,7 @@ function formatTimeAgo(isoDate: string): string {
 }
 
 function formatSize(bytes: number): string {
+  if (!Number.isFinite(bytes)) return ''
   if (bytes < 1024) return `${bytes}B`
   if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)}K`
   return `${(bytes / (1024 * 1024)).toFixed(1)}M`
@@ -28,9 +33,13 @@ function formatSize(bytes: number): string {
 export function HistoryPicker() {
   const resumeSession = useSessionStore((s) => s.resumeSession)
   const isExpanded = useSessionStore((s) => s.isExpanded)
+  // Zustand 5 ignores a second `equalityFn` argument, so the field comparison
+  // this used to pass never ran. Select the two fields instead.
   const activeTab = useSessionStore(
-    (s) => s.tabs.find((t) => t.id === s.activeTabId),
-    (a, b) => a === b || (!!a && !!b && a.hasChosenDirectory === b.hasChosenDirectory && a.workingDirectory === b.workingDirectory),
+    useShallow((s) => {
+      const t = s.tabs.find((t) => t.id === s.activeTabId)
+      return { hasChosenDirectory: t?.hasChosenDirectory, workingDirectory: t?.workingDirectory }
+    }),
   )
   const staticInfo = useSessionStore((s) => s.staticInfo)
   const popoverLayer = usePopoverLayer()
@@ -68,7 +77,14 @@ export function HistoryPicker() {
     setLoading(true)
     try {
       const result = await window.clui.listSessions(effectiveProjectPath)
-      setSessions(result)
+      // Trust nothing off the wire. A row without a usable sessionId cannot be
+      // rendered or resumed, and one such row used to throw during render and
+      // unmount the entire app — the launcher went blank and never came back.
+      setSessions(
+        (Array.isArray(result) ? result : []).filter(
+          (s): s is SessionMeta => !!s && typeof s.sessionId === 'string' && s.sessionId.length > 0,
+        ),
+      )
     } catch {
       setSessions([])
     }
@@ -168,7 +184,7 @@ export function HistoryPicker() {
                 <ChatCircle size={13} className="flex-shrink-0 mt-0.5" style={{ color: colors.textTertiary }} />
                 <div className="min-w-0 flex-1">
                   <div className="text-[11px] truncate" style={{ color: colors.textPrimary }}>
-                    {session.firstMessage || session.slug || session.sessionId.substring(0, 8)}
+                    {session.firstMessage || session.slug || (session.sessionId || '').substring(0, 8) || 'Session'}
                   </div>
                   <div className="flex items-center gap-2 text-[10px] mt-0.5" style={{ color: colors.textTertiary }}>
                     <span>{formatTimeAgo(session.lastTimestamp)}</span>

@@ -56,8 +56,8 @@ export function ControlCenterPanel() {
     // Fills whatever height the parent allows rather than demanding 560px —
     // a fixed height here is what pushed the panel off the top of the window
     // when a conversation was open below it.
-    <div data-clui-ui style={{ flex: 1, minHeight: 0, maxHeight: 560, display: 'flex', flexDirection: 'column' }}>
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '14px 18px', borderBottom: `1px solid ${colors.containerBorder}` }}>
+    <div data-clui-ui style={{ flex: 1, minHeight: 0, maxHeight: 640, display: 'flex', flexDirection: 'column' }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '14px 18px', borderBottom: `1px solid ${colors.containerBorder}`, flexShrink: 0 }}>
         <div style={{ display: 'flex', gap: 8 }}>
           <TabBtn active={tab === 'agents'} label="Agents" icon={<Robot size={14} />} onClick={() => setTab('agents')} colors={colors} />
           <TabBtn active={tab === 'settings'} label="Settings" icon={<SlidersHorizontal size={14} />} onClick={() => setTab('settings')} colors={colors} />
@@ -605,6 +605,9 @@ function ConnectionCard({ colors, onLog }: { colors: Colors; onLog: (line: strin
     aliveRef.current = true
     void refresh()
     return () => { aliveRef.current = false }
+    // Mount-only: refresh is recreated each render and re-running this would
+    // reset the panel's liveness flag on every keystroke.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   const applyMode = async (next: import('../../shared/types').ConnectionMode) => {
@@ -778,6 +781,9 @@ function NodeHostCard({ colors, onLog }: { colors: Colors; onLog: (line: string)
       if (timer) clearTimeout(timer)
       unsub()
     }
+    // Mount-only: this owns a subscription and a poll timer for the panel's
+    // lifetime, not for the lifetime of any one render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   const act = async (action: import('../../shared/types').NodeAction) => {

@@ -31,7 +31,7 @@ export function GuidedTourOverlay({
   useEffect(() => {
     if (!open || !current) return
     const update = () => {
-      const el = document.querySelector(current.selector) as HTMLElement | null
+      const el = document.querySelector(current.selector)
       setRect(el ? el.getBoundingClientRect() : null)
     }
     update()

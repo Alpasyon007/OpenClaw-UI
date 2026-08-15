@@ -93,7 +93,7 @@ export class ProcessManager extends EventEmitter {
 
     log(`Spawned PID: ${child.pid}`)
 
-    const parser = StreamParser.fromStream(child.stdout!)
+    const parser = StreamParser.fromStream(child.stdout)
 
     const handle: RunHandle = {
       runId,
@@ -133,8 +133,8 @@ export class ProcessManager extends EventEmitter {
       this.emit('stderr', runId, data)
     })
 
-    child.stdin!.write(options.prompt)
-    child.stdin!.end()
+    child.stdin.write(options.prompt)
+    child.stdin.end()
 
     this.activeRuns.set(runId, handle)
     return handle

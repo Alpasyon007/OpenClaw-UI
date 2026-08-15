@@ -7,7 +7,7 @@ on:
   pull_request:
 
 jobs:
-  build-windows:
+  verify:
     runs-on: windows-latest
     timeout-minutes: 30
     steps:
@@ -17,7 +17,7 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
 
       - name: Install deps
@@ -26,15 +26,28 @@ jobs:
       - name: Typecheck
         run: npm run typecheck
 
+      - name: Lint
+        run: npm run lint
+
+      # The bundle guards in tests/contract/bundle.test.ts only run when
+      # dist/renderer exists, so the build has to come before the tests.
       - name: Build renderer
         run: npm run build
 
       # The C++ shell needs CMake, the saucer dependencies and WebView2, so the
-      # full `npm run dist` is not run here. These two cover everything that is
+      # full `npm run dist` is not run here. This covers everything that is
       # JavaScript: the generated bridge must stay in step with the contract,
       # and the sidecar must actually bundle.
-      - name: Generate clui shim
-        run: npm run shim
+      - name: Check committed generated artefacts
+        run: npm run check:generated
 
-      - name: Bundle sidecar
-        run: npm run sidecar
+      - name: Test
+        run: npm run coverage
+
+      - name: Upload coverage
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: reports/
+          if-no-files-found: ignore

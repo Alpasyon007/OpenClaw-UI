@@ -66,7 +66,6 @@ export function ConversationView() {
   const staticInfo = useSessionStore((s) => s.staticInfo)
   const scrollRef = useRef<HTMLDivElement>(null)
   const bottomRef = useRef<HTMLDivElement>(null)
-  const [hovered, setHovered] = useState(false)
   const [renderOffset, setRenderOffset] = useState(0) // 0 = show from tail
   const [searchQuery, setSearchQuery] = useState('')
   const [searchIndex, setSearchIndex] = useState(0)
@@ -113,8 +112,10 @@ export function ConversationView() {
     }
   }, [scrollTrigger])
 
-  // Group only the visible slice of messages
-  const allMessages = tab?.messages ?? []
+  // Group only the visible slice of messages.
+  // Memoised on the array identity: the `?? []` fallback allocated a fresh
+  // array every render, which invalidated every downstream useMemo.
+  const allMessages = useMemo(() => tab?.messages ?? [], [tab?.messages])
   const totalCount = allMessages.length
   const startIndex = Math.max(0, totalCount - INITIAL_RENDER_CAP - renderOffset * PAGE_SIZE)
   const visibleMessages = startIndex > 0 ? allMessages.slice(startIndex) : allMessages
@@ -215,39 +216,43 @@ export function ConversationView() {
     return () => window.removeEventListener('resize', onResize)
   }, [exportOpen, updateExportPos])
 
-  if (!tab) return null
-
   useEffect(() => {
     setSearchIndex(0)
   }, [normalizedQuery, activeTabId])
 
   useEffect(() => {
     if (!activeSearchId || !scrollRef.current) return
-    const node = scrollRef.current.querySelector(`[data-msg-id="${activeSearchId}"]`) as HTMLElement | null
+    const node = scrollRef.current.querySelector(`[data-msg-id="${activeSearchId}"]`)
     if (node) node.scrollIntoView({ block: 'center', behavior: 'smooth' })
   }, [activeSearchId])
 
-  const isRunning = tab.status === 'running' || tab.status === 'connecting'
-  const isDead = tab.status === 'dead'
-  const isFailed = tab.status === 'failed'
-  const showInterrupt = isRunning && tab.messages.some((m) => m.role === 'user')
+  const isRunning = tab?.status === 'running' || tab?.status === 'connecting'
+  const isDead = tab?.status === 'dead'
+  const isFailed = tab?.status === 'failed'
+  const showInterrupt = isRunning && allMessages.some((m) => m.role === 'user')
   const showTypingBubble = useMemo(() => {
     const lastUserIdx = (() => {
-      for (let i = tab.messages.length - 1; i >= 0; i--) {
-        if (tab.messages[i].role === 'user') return i
+      for (let i = allMessages.length - 1; i >= 0; i--) {
+        if (allMessages[i].role === 'user') return i
       }
       return -1
     })()
     if (lastUserIdx < 0) return false
 
-    const hasReplyAfterLastUser = tab.messages
+    const hasReplyAfterLastUser = allMessages
       .slice(lastUserIdx + 1)
       .some((m) => m.role === 'assistant' && !/^gateway\b/i.test(m.content.trim()) && m.content.trim().length > 0)
 
     if (hasReplyAfterLastUser) return false
     if (isFailed || isDead) return false
-    return isRunning || tab.status === 'completed'
-  }, [tab.messages, tab.status, isRunning, isFailed, isDead])
+    return isRunning || tab?.status === 'completed'
+  }, [allMessages, tab?.status, isRunning, isFailed, isDead])
+
+  // Every hook above runs unconditionally. The early returns used to sit before
+  // the last three, so closing the active tab changed the hook count between
+  // renders and React threw "rendered fewer hooks than expected", taking the
+  // whole view down rather than showing an empty state.
+  if (!tab) return null
 
   if (tab.messages.length === 0) {
     return <EmptyState />
@@ -266,8 +271,6 @@ export function ConversationView() {
   return (
     <div
       data-clui-ui
-      onMouseEnter={() => setHovered(true)}
-      onMouseLeave={() => setHovered(false)}
     >
       {/* Scrollable messages area */}
       <div
@@ -287,7 +290,10 @@ export function ConversationView() {
             style={{
               border: `1px solid ${colors.containerBorder}`,
               background: colors.surfacePrimary,
-              boxShadow: `0 8px 24px ${colors.shadowMid}`,
+              // `colors.shadowMid` was never a token in either palette, so this
+              // interpolated `undefined` and the bar floated with no shadow at
+              // all. popoverShadow is what every other floating surface uses.
+              boxShadow: colors.popoverShadow,
             }}
           >
             <MagnifyingGlass size={12} className="flex-shrink-0" style={{ color: colors.textTertiary }} />
@@ -308,7 +314,7 @@ export function ConversationView() {
                 style={{
                   border: `1px solid ${colors.containerBorder}`,
                   color: colors.textSecondary,
-                  background: colors.surfaceElevated,
+                  background: colors.surfaceSecondary,
                   opacity: searchableIds.length === 0 ? 0.4 : 1,
                 }}
                 title="Previous match"
@@ -322,7 +328,7 @@ export function ConversationView() {
                 style={{
                   border: `1px solid ${colors.containerBorder}`,
                   color: colors.textSecondary,
-                  background: colors.surfaceElevated,
+                  background: colors.surfaceSecondary,
                   opacity: searchableIds.length === 0 ? 0.4 : 1,
                 }}
                 title="Next match"
@@ -339,7 +345,7 @@ export function ConversationView() {
                 setExportOpen((o) => !o)
               }}
               className="text-[10px] p-1.5 rounded-full inline-flex items-center gap-1 flex-shrink-0"
-              style={{ border: `1px solid ${colors.containerBorder}`, color: colors.textSecondary, background: colors.surfaceElevated }}
+              style={{ border: `1px solid ${colors.containerBorder}`, color: colors.textSecondary, background: colors.surfaceSecondary }}
               title="Export conversation"
             >
               <FileArrowUp size={12} />
@@ -458,7 +464,11 @@ export function ConversationView() {
             <PermissionDeniedCard
               tools={tab.permissionDenied.tools}
               sessionId={tab.claudeSessionId}
-              projectPath={staticInfo?.projectPath || process.cwd()}
+              // `process` does not exist in the WebView, and Vite substitutes
+              // only `process.env`: this shipped verbatim and threw a
+              // ReferenceError the moment a denied-permission card rendered.
+              // The tab already carries the directory the run was started in.
+              projectPath={staticInfo?.projectPath || tab.workingDirectory}
               onDismiss={() => {
                 useSessionStore.setState((s) => ({
                   tabs: s.tabs.map((t) =>
@@ -621,7 +631,7 @@ function InterruptButton({ tabId }: { tabId: string }) {
   const colors = useColors()
 
   const handleStop = () => {
-    window.clui.stopTab(tabId)
+    void window.clui.stopTab(tabId)
   }
 
   return (
@@ -760,7 +770,6 @@ function AssistantTypingBubble() {
           <div className="flex flex-col gap-1.5">
             {[0, 1, 2].map((i) => (
               <motion.div
-                // eslint-disable-next-line react/no-array-index-key
                 key={i}
                 className="h-[7px] rounded-full"
                 style={{ background: colors.surfaceHover }}
@@ -852,7 +861,7 @@ function ImageCard({ src, alt, colors }: { src?: string; alt?: string; colors: R
   // Reset failed state when src changes (e.g. during streaming)
   useEffect(() => { setFailed(false) }, [src])
   const label = alt || 'Image'
-  const open = () => { if (src) window.clui.openExternal(String(src)) }
+  const open = () => { if (src) void window.clui.openExternal(String(src)) }
 
   if (failed || !src) {
     return (
@@ -915,7 +924,7 @@ const AssistantMessage = React.memo(function AssistantMessage({
         className="underline decoration-dotted underline-offset-2 cursor-pointer"
         style={{ color: colors.accent }}
         onClick={() => {
-          if (href) window.clui.openExternal(String(href))
+          if (href) void window.clui.openExternal(String(href))
         }}
       >
         {children}

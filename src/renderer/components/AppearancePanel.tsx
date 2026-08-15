@@ -6,7 +6,7 @@ import {
   useColors, useThemeStore, BUILT_IN_THEMES,
   useScreenWidth, resolveWidth, maxPanelWidthFor,
   PANEL_WIDTH_MIN, PANEL_PERCENT_MIN, PANEL_PERCENT_MAX,
-  type WidthSetting, type WidthMode,
+  type WidthSetting,
 } from '../theme'
 import { derivePalette } from '../theme-derive'
 import type { Theme, ThemeSeeds } from '../../shared/theme-types'
@@ -62,7 +62,7 @@ export function AppearancePanel() {
   const seeds = theme[mode]
 
   const setSeed = (key: keyof ThemeSeeds, value: string): void => {
-    updateActiveTheme({ [mode]: { [key]: value } } as any)
+    updateActiveTheme({ [mode]: { [key]: value } })
   }
 
   const exportTheme = async (): Promise<void> => {
@@ -205,7 +205,7 @@ export function AppearancePanel() {
               label={f.label}
               placeholder={f.placeholder}
               value={theme.branding[f.key] || ''}
-              onChange={(v) => updateActiveTheme({ branding: { [f.key]: v } as any })}
+              onChange={(v) => updateActiveTheme({ branding: { [f.key]: v } })}
               colors={colors}
             />
           ))}
@@ -330,7 +330,7 @@ function ThemeCard({ theme, isDark, active, colors, onSelect, onDelete }: {
     try {
       const seeds = isDark ? theme.dark : theme.light
       const ov = isDark ? theme.overrides?.dark : theme.overrides?.light
-      return derivePalette(seeds, theme.effects, isDark, ov as any)
+      return derivePalette(seeds, theme.effects, isDark, ov)
     } catch {
       return null
     }

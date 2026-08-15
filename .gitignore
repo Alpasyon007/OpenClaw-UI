@@ -6,6 +6,9 @@ build/
 release/
 *.tsbuildinfo
 
+# Test and coverage output
+reports/
+
 # OS artifacts
 .DS_Store
 Thumbs.db

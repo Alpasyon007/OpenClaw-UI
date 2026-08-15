@@ -34,7 +34,6 @@ import { log as _log } from '../logger'
 import { getCliEnv } from '../cli-env'
 import { getCliRuntime, type CliRuntime } from '../openclaw/runtime'
 import type {
-  NormalizedEvent,
   RunOptions,
   EnrichedError,
   GatewayConnectionState,
@@ -269,7 +268,7 @@ export class AgentRunManager extends EventEmitter {
       mcpServers: [],
       skills: [],
       version: '',
-    } as NormalizedEvent)
+    })
 
     child.stdout?.setEncoding('utf-8')
     child.stdout?.on('data', (chunk: string) => {
@@ -334,7 +333,7 @@ export class AgentRunManager extends EventEmitter {
           : `The agent CLI returned no readable reply (exit ${code}).`,
         isError: true,
         sessionId: handle.sessionId || undefined,
-      } as NormalizedEvent)
+      })
       return
     }
 
@@ -359,7 +358,7 @@ export class AgentRunManager extends EventEmitter {
         detail: usedEmbeddedFallback
           ? `ran on the embedded agent instead${meta.fallbackReason ? ` (${meta.fallbackReason})` : ''}`
           : undefined,
-      } as NormalizedEvent)
+      })
     }
 
     if (!ok) {
@@ -369,7 +368,7 @@ export class AgentRunManager extends EventEmitter {
         message: describeFailure(res),
         isError: true,
         sessionId: handle.sessionId || undefined,
-      } as NormalizedEvent)
+      })
       return
     }
 
@@ -385,7 +384,7 @@ export class AgentRunManager extends EventEmitter {
           : 'The agent finished without sending a reply.',
         isError: true,
         sessionId: handle.sessionId || undefined,
-      } as NormalizedEvent)
+      })
       return
     }
 
@@ -407,11 +406,11 @@ export class AgentRunManager extends EventEmitter {
         skills: [],
         version: '',
         isWarmup: true,
-      } as NormalizedEvent)
+      })
     }
 
     if (text) {
-      this.emit('normalized', requestId, { type: 'text_chunk', text } as NormalizedEvent)
+      this.emit('normalized', requestId, { type: 'text_chunk', text })
     }
 
     handle.terminalOutcome = 'complete'
@@ -425,7 +424,7 @@ export class AgentRunManager extends EventEmitter {
       numTurns: 1,
       usage: toUsageData(meta),
       sessionId: handle.sessionId || '',
-    } as NormalizedEvent)
+    })
   }
 
   /**

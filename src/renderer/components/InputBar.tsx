@@ -1,4 +1,4 @@
-import React, { useState, useRef, useCallback, useEffect, useLayoutEffect } from 'react'
+import React, { useState, useRef, useCallback, useEffect, useLayoutEffect, useMemo } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { Microphone, SpinnerGap, X, Check } from '@phosphor-icons/react'
 import { useSessionStore } from '../stores/sessionStore'
@@ -57,11 +57,14 @@ export function InputBar() {
   const canSend = !!tab && !isBusy && hasContent
   const attachments = tab?.attachments || []
   const showSlashMenu = slashFilter !== null && !isConnecting
-  const skillCommands: SlashCommand[] = (tab?.sessionSkills || []).map((skill) => ({
-    command: `/${skill}`,
-    description: `Run skill: ${skill}`,
-    icon: <span className="text-[11px]">✦</span>,
-  }))
+  const skillCommands: SlashCommand[] = useMemo(
+    () => (tab?.sessionSkills || []).map((skill) => ({
+      command: `/${skill}`,
+      description: `Run skill: ${skill}`,
+      icon: <span className="text-[11px]">✦</span>,
+    })),
+    [tab?.sessionSkills],
+  )
 
   useEffect(() => {
     textareaRef.current?.focus({ preventScroll: true })
@@ -141,6 +144,23 @@ export function InputBar() {
   }, [input, measureInlineHeight])
 
   useLayoutEffect(() => { autoResize() }, [input, isMultiLine, autoResize])
+
+  // The slash menu is portalled and positions itself against the input's box.
+  // That rect used to be read straight out of `wrapperRef.current` during
+  // render, which reports the layout from *before* this render committed and
+  // never updates while the menu is open — so the menu drifted away from the
+  // input on resize. Measure after commit, and re-measure on resize.
+  const [slashAnchorRect, setSlashAnchorRect] = useState<DOMRect | null>(null)
+  useLayoutEffect(() => {
+    if (!showSlashMenu) {
+      setSlashAnchorRect(null)
+      return
+    }
+    const measure = () => setSlashAnchorRect(wrapperRef.current?.getBoundingClientRect() ?? null)
+    measure()
+    window.addEventListener('resize', measure)
+    return () => window.removeEventListener('resize', measure)
+  }, [showSlashMenu])
 
   useEffect(() => {
     return () => {
@@ -254,7 +274,7 @@ export function InputBar() {
   // ─── Send ───
   const handleSend = useCallback(() => {
     if (showSlashMenu) {
-      const filtered = getFilteredCommandsWithExtras(slashFilter!, skillCommands)
+      const filtered = getFilteredCommandsWithExtras(slashFilter, skillCommands)
       if (filtered.length > 0) {
         handleSlashSelect(filtered[slashIndex])
         return
@@ -293,12 +313,12 @@ export function InputBar() {
     sendMessage(prompt || 'See attached files')
     // Refocus after React re-renders from the state update
     requestAnimationFrame(() => textareaRef.current?.focus({ preventScroll: true }))
-  }, [input, isBusy, sendMessage, attachments.length, showSlashMenu, slashFilter, slashIndex, handleSlashSelect, openclawModels, activeProvider, setOpenclawModel, setPreferredModel, addSystemMessage, isExpanded, toggleExpanded])
+  }, [input, isBusy, sendMessage, attachments.length, showSlashMenu, slashFilter, slashIndex, handleSlashSelect, skillCommands, openclawModels, activeProvider, setOpenclawModel, setPreferredModel, addSystemMessage, isExpanded, toggleExpanded])
 
   // ─── Keyboard ───
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (showSlashMenu) {
-      const filtered = getFilteredCommandsWithExtras(slashFilter!, skillCommands)
+      const filtered = getFilteredCommandsWithExtras(slashFilter, skillCommands)
       if (e.key === 'ArrowDown') { e.preventDefault(); setSlashIndex((i) => (i + 1) % filtered.length); return }
       if (e.key === 'ArrowUp') { e.preventDefault(); setSlashIndex((i) => (i - 1 + filtered.length) % filtered.length); return }
       if (e.key === 'Tab') { e.preventDefault(); if (filtered.length > 0) handleSlashSelect(filtered[slashIndex]); return }
@@ -327,6 +347,9 @@ export function InputBar() {
         const blob = item.getAsFile()
         if (!blob) return
         const reader = new FileReader()
+        // `reader` is a fresh local, so there is no shared state to race on;
+        // the rule cannot see that across the await above.
+        // eslint-disable-next-line require-atomic-updates
         reader.onload = async () => {
           const dataUrl = reader.result as string
           const attachment = await window.clui.pasteImage(dataUrl)
@@ -405,10 +428,10 @@ export function InputBar() {
       <AnimatePresence>
         {showSlashMenu && (
           <SlashCommandMenu
-            filter={slashFilter!}
+            filter={slashFilter}
             selectedIndex={slashIndex}
             onSelect={handleSlashSelect}
-            anchorRect={wrapperRef.current?.getBoundingClientRect() ?? null}
+            anchorRect={slashAnchorRect}
             extraCommands={skillCommands}
           />
         )}
@@ -641,7 +664,7 @@ async function blobToWavBase64(blob: Blob): Promise<string> {
   const arrayBuffer = await blob.arrayBuffer()
   const audioCtx = new AudioContext()
   const decoded = await audioCtx.decodeAudioData(arrayBuffer)
-  audioCtx.close()
+  void audioCtx.close()
   const mono = mixToMono(decoded)
   const inputRms = rmsLevel(mono)
   if (inputRms < 0.003) {

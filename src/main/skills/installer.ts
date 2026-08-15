@@ -9,7 +9,7 @@
  */
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, rmSync, cpSync } from 'fs'
-import { join, dirname } from 'path'
+import { join } from 'path'
 import { homedir } from 'os'
 import { exec } from 'child_process'
 import { randomUUID } from 'crypto'
@@ -49,6 +49,7 @@ interface VersionMeta {
 }
 
 function log(msg: string): void {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
   const { appendFileSync } = require('fs')
   const line = `[${new Date().toISOString()}] [skills] ${msg}\n`
   try { appendFileSync(join(homedir(), '.clui-debug.log'), line) } catch {}

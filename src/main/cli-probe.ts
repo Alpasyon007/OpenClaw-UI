@@ -82,22 +82,31 @@ function execThrottled(
     () =>
       new Promise<CliResult>((resolve) => {
         const startedAt = Date.now()
-        const child = execFile(
-          command,
-          args,
-          { encoding: 'utf-8', timeout: timeoutMs, env, maxBuffer: 8 * 1024 * 1024 },
-          (err: any, stdout: string, stderr: string) => {
-            releaseSlot()
-            const elapsed = Date.now() - startedAt
-            if (elapsed > 3000) log(`slow probe (${elapsed}ms): ${args.slice(0, 3).join(' ')}`)
-            resolve({
-              ok: !err,
-              stdout: String(stdout || '').trim(),
-              stderr: String(stderr || err?.message || '').trim(),
-            })
-          },
-        )
-        deprioritize(child.pid)
+        try {
+          const child = execFile(
+            command,
+            args,
+            { encoding: 'utf-8', timeout: timeoutMs, env, maxBuffer: 8 * 1024 * 1024 },
+            (err: any, stdout: string, stderr: string) => {
+              releaseSlot()
+              const elapsed = Date.now() - startedAt
+              if (elapsed > 3000) log(`slow probe (${elapsed}ms): ${args.slice(0, 3).join(' ')}`)
+              resolve({
+                ok: !err,
+                stdout: String(stdout || '').trim(),
+                stderr: String(stderr || err?.message || '').trim(),
+              })
+            },
+          )
+          deprioritize(child.pid)
+        } catch (err: any) {
+          // execFile can throw before it ever schedules the callback — a
+          // malformed command path or a rejected env does it. The callback is
+          // then never called, so without this the slot is held forever and
+          // every later probe queues behind it until the app is restarted.
+          releaseSlot()
+          resolve({ ok: false, stdout: '', stderr: String(err?.message ?? err) })
+        }
       }),
   )
 }

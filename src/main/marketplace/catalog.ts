@@ -1,10 +1,10 @@
 import { execFile } from 'child_process'
 import { readFile, readdir, mkdir, writeFile, rm } from 'fs/promises'
-import { join, resolve } from 'path'
+import { join, resolve, sep } from 'path'
 import type { CatalogPlugin } from '../../shared/types'
 import { log as _log } from '../logger'
 import { getCliEnv } from '../cli-env'
-import { findCliBinary, getPrimaryAgentHome } from '../openclaw/runtime'
+import { cliInvocation, findCliBinary, getAgentDataHomes, getPrimaryAgentHome } from '../openclaw/runtime'
 
 // ─── Input Validation ───
 
@@ -28,8 +28,13 @@ function validateSourcePath(p: string): boolean {
 }
 
 function assertSkillDirContained(skillsDir: string, base: string): void {
+  // `sep`, not a hardcoded '/': on Windows `resolve()` returns backslash paths,
+  // so this compared `C:\...\skills\name` against a `C:\...\skills/` prefix
+  // and rejected every legitimate skill directory. Installing or uninstalling
+  // any skill threw "Path escapes skills directory" before touching the disk.
   const resolved = resolve(skillsDir)
-  if (!resolved.startsWith(base + '/') && resolved !== base) {
+  const root = resolve(base)
+  if (!resolved.startsWith(root + sep) && resolved !== root) {
     throw new Error(`Path escapes skills directory: ${resolved}`)
   }
 }
@@ -69,6 +74,16 @@ export async function fetchCatalog(forceRefresh?: boolean): Promise<{ plugins: C
 
   const allPlugins: CatalogPlugin[] = []
   const errors: string[] = []
+
+  // Started here, awaited last. It shells out to the CLI, which takes ~7s
+  // against a remote gateway — enough to dominate a cold open if it waited its
+  // turn behind the network fetches instead of running alongside them.
+  const gatewayPromise = fetchGatewaySkills().catch((err: unknown) => {
+    const msg = `Gateway skills fetch error: ${String(err)}`
+    log(msg)
+    errors.push(msg)
+    return [] as CatalogPlugin[]
+  })
 
   const results = await Promise.allSettled(
     SOURCES.map(async (source) => {
@@ -216,6 +231,21 @@ export async function fetchCatalog(forceRefresh?: boolean): Promise<{ plugins: C
     errors.push(msg)
   }
 
+  // The runtime's own skills, folded in last. Errors were already captured by
+  // the catch on the promise: a gateway that is unreachable must degrade to the
+  // browsable catalogue, not empty it.
+  const gatewayPlugins = await gatewayPromise
+  if (gatewayPlugins.length > 0) {
+    // A gateway skill wins over a same-named catalogue entry — one is a thing
+    // you have, the other a thing you could install. Single pass rather than a
+    // findIndex per skill, since allPlugins is well over a thousand entries.
+    const gatewayNames = new Set(gatewayPlugins.map((p) => p.installName.toLowerCase()))
+    for (let i = allPlugins.length - 1; i >= 0; i--) {
+      if (gatewayNames.has(allPlugins[i].installName.toLowerCase())) allPlugins.splice(i, 1)
+    }
+    allPlugins.push(...gatewayPlugins)
+  }
+
   for (const r of results) {
     if (r.status === 'rejected') {
       log(`Source fetch error: ${r.reason}`)
@@ -228,50 +258,208 @@ export async function fetchCatalog(forceRefresh?: boolean): Promise<{ plugins: C
     return { plugins: [], error: errors.join('; ') }
   }
 
-  // Sort by name
-  allPlugins.sort((a, b) => a.name.localeCompare(b.name))
+  // What you already have comes first — scattered alphabetically through a
+  // thousand-odd installable entries, the gateway skills would be no more
+  // visible than before. Ready ones lead, then the ones present but blocked,
+  // then everything installable. Gateway entries sort on installName so a
+  // leading emoji does not drive the order.
+  const rank = (p: CatalogPlugin): number =>
+    p.installMode !== 'gateway' ? 2 : p.gatewayReady === false ? 1 : 0
+  allPlugins.sort((a, b) => {
+    const ra = rank(a)
+    const rb = rank(b)
+    if (ra !== rb) return ra - rb
+    return ra === 2
+      ? a.name.localeCompare(b.name)
+      : a.installName.localeCompare(b.installName)
+  })
 
-  // Update cache
+  // Update cache. Two concurrent refreshes both write a complete catalogue;
+  // last writer wins, and neither can observe a half-written one.
+  // eslint-disable-next-line require-atomic-updates
   cachedPlugins = allPlugins
+  // eslint-disable-next-line require-atomic-updates
   cacheTimestamp = Date.now()
 
   return { plugins: allPlugins, error: null }
 }
 
-// ─── listInstalled ───
-// Reads directly from the OpenClaw home directory for installed plugins/skills.
+// ─── Gateway skills ───
 
-export async function listInstalled(): Promise<string[]> {
-  const cliHomeDir = getPrimaryAgentHome()
-  const names: string[] = []
+/**
+ * Shape of `openclaw skills list --json`. Only the fields we consume.
+ *
+ * `managedSkillsDir` is worth logging: under a remote gateway it is a path
+ * inside the gateway container (`/home/node/.openclaw/skills`), which is the
+ * clearest signal that no local directory scan could ever have found these.
+ */
+interface GatewaySkillsPayload {
+  managedSkillsDir?: string
+  skills?: Array<{
+    name?: string
+    description?: string
+    emoji?: string
+    source?: string
+    disabled?: boolean
+    eligible?: boolean
+    homepage?: string
+    missing?: GatewayMissing
+  }>
+}
 
-  // 1. Installed plugins from JSON registry
-  try {
-    const raw = await readFile(join(cliHomeDir, 'plugins', 'installed_plugins.json'), 'utf-8')
-    const data = JSON.parse(raw) as { plugins?: Record<string, unknown> }
-    if (data.plugins) {
-      for (const key of Object.keys(data.plugins)) {
-        // Keys are "name@marketplace" e.g. "design@knowledge-work-plugins"
-        const pluginName = key.split('@')[0]
-        if (pluginName) names.push(pluginName)
-        // Also push the full key for exact matching
-        names.push(key)
-      }
+/** Requirements the runtime could not satisfy, so a skill is present but off. */
+interface GatewayMissing {
+  bins?: string[]
+  anyBins?: string[]
+  env?: string[]
+  config?: string[]
+  os?: string[]
+}
+
+const OS_LABELS: Record<string, string> = {
+  darwin: 'macOS',
+  win32: 'Windows',
+  linux: 'Linux',
+}
+
+/**
+ * Why a skill is not ready, in the words a reader can act on.
+ *
+ * The CLI reports this structurally (`missing.bins`, `missing.os`, …); without
+ * turning it into prose a disabled row just says "not ready" and leaves you to
+ * go and ask the CLI yourself.
+ */
+function describeGatewayBlock(missing?: GatewayMissing): string | undefined {
+  if (!missing) return undefined
+  const parts: string[] = []
+  // OS first: it is the one requirement the reader cannot resolve by installing
+  // something.
+  const os = missing.os ?? []
+  if (os.length > 0) parts.push(`${os.map((o) => OS_LABELS[o] ?? o).join('/')} only`)
+  const bins = missing.bins ?? []
+  if (bins.length > 0) parts.push(`needs ${bins.join(', ')}`)
+  const anyBins = missing.anyBins ?? []
+  if (anyBins.length > 0) parts.push(`needs one of ${anyBins.join(' or ')}`)
+  const env = missing.env ?? []
+  if (env.length > 0) parts.push(`needs ${env.join(', ')}`)
+  const config = missing.config ?? []
+  if (config.length > 0) parts.push(`needs config ${config.join(', ')}`)
+  return parts.length > 0 ? parts.join(' · ') : undefined
+}
+
+/**
+ * Skills the agent runtime actually has, as catalogue entries.
+ *
+ * This is the authoritative answer to "what do I have?" — it covers bundled,
+ * extra and workspace skills, and it follows the configured gateway, so a
+ * remote runtime reports its own inventory rather than this machine's.
+ *
+ * The full inventory is surfaced, including skills that are present but not
+ * currently usable (missing binaries, wrong OS). Those carry `gatewayReady:
+ * false` and a reason, so the panel can badge them rather than imply they are
+ * ready to run.
+ */
+export async function fetchGatewaySkills(): Promise<CatalogPlugin[]> {
+  const { command, args } = cliInvocation(['skills', 'list', '--json'])
+  const res = await execAsync(command, args, 45000)
+  if (res.exitCode !== 0) {
+    // A CLI without the subcommand is a normal state, not a failure worth
+    // surfacing — it just means this install has no gateway inventory.
+    if (/unknown command|does not know the command|is not a known command/i.test(`${res.stdout}\n${res.stderr}`)) {
+      log('fetchGatewaySkills: CLI has no `skills list` subcommand')
+      return []
     }
-  } catch (e) {
-    log(`listInstalled: no installed_plugins.json or parse error: ${e}`)
+    throw new Error(res.stderr.trim() || res.stdout.trim() || 'openclaw skills list failed')
   }
 
-  // 2. Installed skills from <cli-home>/skills/
-  try {
-    const entries = await readdir(join(cliHomeDir, 'skills'), { withFileTypes: true })
-    for (const entry of entries) {
-      if (entry.isDirectory()) {
-        names.push(entry.name)
+  // The CLI prints a banner before the JSON on some paths, so start at the
+  // first brace rather than assuming the whole of stdout parses.
+  const start = res.stdout.indexOf('{')
+  if (start === -1) throw new Error('openclaw skills list returned no JSON')
+  const payload = JSON.parse(res.stdout.slice(start)) as GatewaySkillsPayload
+
+  const skills = payload.skills ?? []
+  log(`fetchGatewaySkills: ${skills.length} reported, managedSkillsDir=${payload.managedSkillsDir ?? 'unknown'}`)
+
+  const out: CatalogPlugin[] = []
+  for (const s of skills) {
+    const name = (s.name || '').trim()
+    if (!name) continue
+    const description = (s.description || '').trim() || 'No description provided.'
+    const source = s.source || 'openclaw'
+    // `disabled` and `eligible` agree in practice, but either one alone being
+    // false is enough to say "do not present this as ready to run".
+    const ready = !s.disabled && s.eligible !== false
+    out.push({
+      id: `gateway/${name}`,
+      name: s.emoji ? `${s.emoji} ${name}` : name,
+      description,
+      version: 'on gateway',
+      author: source,
+      marketplace: 'Your Gateway',
+      repo: '',
+      sourcePath: '',
+      installName: name,
+      category: GATEWAY_CATEGORIES[source] ?? 'On Your Gateway',
+      // Not 'Installed': the panel appends its own special 'Installed' chip, and
+      // a derived tag of the same text would collide with it on the React key.
+      tags: Array.from(new Set(['Gateway', ...deriveSemanticTags(name, description, source)])),
+      isSkillMd: false,
+      installMode: 'gateway',
+      installCommand: `openclaw skills info ${name}`,
+      externalUrl: s.homepage,
+      gatewaySource: source,
+      gatewayReady: ready,
+      gatewayBlockReason: ready ? undefined : describeGatewayBlock(s.missing),
+    })
+  }
+  return out
+}
+
+const GATEWAY_CATEGORIES: Record<string, string> = {
+  'openclaw-bundled': 'Bundled',
+  'openclaw-extra': 'Extra',
+  'openclaw-workspace': 'Workspace',
+}
+
+// ─── listInstalled ───
+// Reads directly from the OpenClaw home directories for installed plugins/skills.
+
+export async function listInstalled(): Promise<string[]> {
+  const names: string[] = []
+
+  // Every candidate home, not just the first. `getPrimaryAgentHome()` returns
+  // `~/.openclaw`, so a skill under `~/.claude/skills` — or a plugin recorded
+  // in `~/.claude/plugins/installed_plugins.json` — read as not installed.
+  for (const cliHomeDir of getAgentDataHomes()) {
+    // 1. Installed plugins from JSON registry
+    try {
+      const raw = await readFile(join(cliHomeDir, 'plugins', 'installed_plugins.json'), 'utf-8')
+      const data = JSON.parse(raw) as { plugins?: Record<string, unknown> }
+      if (data.plugins) {
+        for (const key of Object.keys(data.plugins)) {
+          // Keys are "name@marketplace" e.g. "design@knowledge-work-plugins"
+          const pluginName = key.split('@')[0]
+          if (pluginName) names.push(pluginName)
+          // Also push the full key for exact matching
+          names.push(key)
+        }
       }
+    } catch (e) {
+      log(`listInstalled: no installed_plugins.json in ${cliHomeDir} or parse error: ${e}`)
     }
-  } catch (e) {
-    log(`listInstalled: no skills dir or read error: ${e}`)
+
+    // 2. Installed skills from <cli-home>/skills/
+    try {
+      const entries = await readdir(join(cliHomeDir, 'skills'), { withFileTypes: true })
+      for (const entry of entries) {
+        if (entry.isDirectory()) {
+          names.push(entry.name)
+        }
+      }
+    } catch (e) {
+      log(`listInstalled: no skills dir in ${cliHomeDir} or read error: ${e}`)
+    }
   }
 
   return [...new Set(names)]

@@ -22,7 +22,7 @@ import {
 import { extname, join, normalize, sep } from 'node:path'
 import { homedir } from 'node:os'
 import { execFile, execFileSync } from 'node:child_process'
-import { writeFile, readdir, readFile as readFileAsync, stat } from 'node:fs/promises'
+import { writeFile, readFile as readFileAsync, stat } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { createInterface } from 'node:readline'
 import process from 'node:process'
@@ -32,10 +32,10 @@ import { IPC } from '../src/shared/types'
 import type { GatewayConfigView, NodeHostStatus } from '../src/shared/types'
 import { getShortcuts } from '../src/shared/shortcuts'
 import { ControlPlane } from '../src/main/claude/control-plane'
-import { getCliRuntime, getAgentDataHomes, cliInvocation } from '../src/main/openclaw/runtime'
-import { getCliEnv } from '../src/main/cli-env'
+import { getCliRuntime } from '../src/main/openclaw/runtime'
 import { fetchCatalog, listInstalled, installPlugin, uninstallPlugin } from '../src/main/marketplace/catalog'
-import { runCliAsync, probe, peekProbe, invalidateProbe, flushProbeCache } from '../src/main/cli-probe'
+import { listSessions } from '../src/main/sessions'
+import { runCliAsync, runBinAsync, probe, peekProbe, invalidateProbe, flushProbeCache } from '../src/main/cli-probe'
 import { ensureSkills } from '../src/main/skills/installer'
 
 /** How long after boot before skill provisioning may hit the network. */
@@ -68,6 +68,9 @@ function emit(event: string, ...args: unknown[]) {
 // file. Serving over loopback avoids that entirely and costs one Node server.
 // Bound to 127.0.0.1 so nothing is reachable off-machine.
 const WEB_PORT = Number(process.env.CLUI_WEB_PORT ?? 17817)
+// The port actually bound. Usually WEB_PORT, but the listener falls back to an
+// ephemeral one when that is taken, and the shell has to be told which.
+let webPort = WEB_PORT
 const WEB_ROOT = process.env.CLUI_WEB_ROOT ?? process.cwd()
 
 const MIME: Record<string, string> = {
@@ -119,7 +122,24 @@ function startWebServer() {
     }
   })
 
-  return new Promise<void>((resolve) => {
+  return new Promise<void>((resolve, reject) => {
+    // Without this listener Node rethrows 'error' as an uncaught exception and
+    // the sidecar dies before its ready handshake, leaving the shell waiting on
+    // a window that never appears. EADDRINUSE is the common case: a stale
+    // sidecar from a hard kill still holds the fixed port.
+    server.once('error', (err: NodeJS.ErrnoException) => {
+      if (err.code === 'EADDRINUSE') {
+        log(`port ${WEB_PORT} is busy — falling back to an ephemeral port`)
+        server.listen(0, '127.0.0.1', () => {
+          const port = (server.address() as { port: number }).port
+          webPort = port
+          log(`serving ${WEB_ROOT} on http://127.0.0.1:${port}`)
+          resolve()
+        })
+        return
+      }
+      reject(err)
+    })
     server.listen(WEB_PORT, '127.0.0.1', () => {
       log(`serving ${WEB_ROOT} on http://127.0.0.1:${WEB_PORT}`)
       resolve()
@@ -259,7 +279,7 @@ function resolveGatewayToken(): string | null {
   const names = [configuredId, 'OPENCLAW_GATEWAY_TOKEN', 'OPENCLAW_REMOTE_TOKEN'].filter(Boolean) as string[]
 
   for (const name of names) {
-    if (process.env[name]) return process.env[name] as string
+    if (process.env[name]) return process.env[name]
   }
   for (const name of names) {
     const fromRegistry = readWindowsUserEnv(name)
@@ -278,7 +298,7 @@ function isRemoteGatewayMode(): boolean {
 }
 
 /** Call a gateway RPC method and parse its JSON reply. Null on any failure. */
-async function gatewayCallJson(method: string, params: unknown = {}, timeoutMs = 25000): Promise<any | null> {
+async function gatewayCallJson(method: string, params: unknown = {}, timeoutMs = 25000): Promise<any> {
   const token = resolveGatewayToken()
   if (!token) {
     log(`gateway call ${method} skipped — no credential resolvable in this process`)
@@ -379,9 +399,13 @@ async function fetchGatewayModelInfo(force = false) {
     const value = await gatewayModelInflight
     // Only cache a real answer: caching null would pin a transient failure for
     // a full minute.
+    // Deliberate: the in-flight guard above means only one caller reaches
+    // here per fetch, and the assignment is a whole new object.
+    // eslint-disable-next-line require-atomic-updates
     if (value) gatewayModelCache = { at: Date.now(), value }
     return value
   } finally {
+    // eslint-disable-next-line require-atomic-updates
     gatewayModelInflight = null
   }
 }
@@ -412,6 +436,117 @@ function openWith(command: string, args: string[]) {
 async function runCli(args: string[], timeoutMs = 20000) {
   const res = await runCliAsync(args, timeoutMs)
   return { ok: res.ok, stdout: res.stdout, stderr: res.stderr }
+}
+
+/** A command attempt: CLI subcommand args, or an unrelated external binary. */
+type RunCandidate = { args: string[]; bin?: string }
+
+/**
+ * Named actions the Control Center and onboarding buttons invoke.
+ *
+ * The renderer sends an action name, never raw CLI arguments — deliberately,
+ * because the arguments differ between CLI versions and the renderer must not
+ * be in the business of constructing command lines. Several actions therefore
+ * list more than one candidate and take the first that succeeds.
+ *
+ * This table was lost when the Electron main process was removed; the sidecar
+ * handler that replaced it destructured `{ args }` and ran the bare CLI with an
+ * empty argument list, so every button in the Control Center silently did
+ * nothing (or printed the CLI's own help text).
+ */
+const OPENCLAW_ACTIONS: Record<string, RunCandidate[]> = {
+  gateway_start: [{ args: ['gateway', 'start'] }],
+  gateway_stop: [{ args: ['gateway', 'stop'] }],
+  gateway_restart: [{ args: ['gateway', 'restart'] }],
+  gateway_install: [{ args: ['gateway', 'install'] }],
+  channels_status: [{ args: ['channels', 'status'] }],
+  plugins_list: [{ args: ['plugins', 'list'] }],
+  skills_list: [{ args: ['skills', 'list'] }],
+  update_check: [
+    { args: ['update', 'check'] },
+    { args: ['update', 'status'] },
+    { args: ['update'] },
+  ],
+  update_upgrade: [
+    { args: ['update', 'upgrade'] },
+    { args: ['update', 'install'] },
+    { args: ['update'] },
+  ],
+  gateway_link_whatsapp_qr: [
+    { args: ['channels', 'whatsapp', 'link'] },
+    { args: ['channels', 'whatsapp', 'qr'] },
+    { args: ['channels', 'link', 'whatsapp'] },
+  ],
+}
+
+/** Slug rules for the parameterised `clawhub_*` actions. */
+const SLUG_RE = /^[a-z0-9][a-z0-9-]*$/i
+
+function candidatesFor(action: string): RunCandidate[] | { error: string } {
+  const fixed = OPENCLAW_ACTIONS[action]
+  if (fixed) return fixed
+
+  if (action.startsWith('clawhub_install:')) {
+    const slug = action.slice('clawhub_install:'.length).trim()
+    if (!SLUG_RE.test(slug)) return { error: `Invalid skill slug: ${slug}` }
+    return [
+      { bin: 'clawhub', args: ['install', slug] },
+      { args: ['clawhub', 'install', slug] },
+    ]
+  }
+  if (action.startsWith('clawhub_inspect:')) {
+    const slug = action.slice('clawhub_inspect:'.length).trim()
+    if (!SLUG_RE.test(slug)) return { error: `Invalid skill slug: ${slug}` }
+    return [{ bin: 'clawhub', args: ['inspect', slug] }]
+  }
+  if (action.startsWith('clawhub_search:')) {
+    const query = action.slice('clawhub_search:'.length).trim()
+    if (!query) return { error: 'Search query is required' }
+    return [{ bin: 'clawhub', args: ['search', query, '--limit', '8'] }]
+  }
+
+  return { error: `Unsupported action: ${action}` }
+}
+
+async function runOpenclawAction(action: string): Promise<{ ok: boolean; output: string; error?: string }> {
+  const resolved = candidatesFor(action)
+  if (!Array.isArray(resolved)) return { ok: false, output: '', error: resolved.error }
+
+  let lastError = 'Command failed'
+  let lastStdout = ''
+  const tried: string[] = []
+
+  for (const candidate of resolved) {
+    tried.push([candidate.bin ?? getCliRuntime().kind, ...candidate.args].join(' '))
+
+    // External binaries run as-is; CLI subcommands go through the resolved
+    // runtime so they work on Windows, where the CLI is a Node script.
+    const res = candidate.bin
+      ? await runBinAsync(candidate.bin, candidate.args, 15000)
+      : await runCliAsync(candidate.args, 15000)
+
+    if (res.ok) {
+      // ClawHub exits 0 with nothing to say when it has no match; treat that as
+      // a miss so the next candidate gets a turn.
+      if (
+        (action.startsWith('clawhub_search:') || action.startsWith('clawhub_inspect:')) &&
+        res.stdout.length === 0
+      ) {
+        lastError = 'ClawHub returned no output'
+        continue
+      }
+      return { ok: true, output: redactSecrets(res.stdout) }
+    }
+
+    lastError = res.stderr || 'Command failed'
+    lastStdout = res.stdout
+  }
+
+  return {
+    ok: false,
+    output: redactSecrets(lastStdout),
+    error: `${redactSecrets(lastError)}\nTried:\n${tried.join('\n')}`.trim(),
+  }
 }
 
 // ─── Channel table ───
@@ -486,7 +621,7 @@ async function collectStartFacts(): Promise<StartFacts> {
   }
 
   let auth: StartFacts['auth'] = {}
-  let authSupported = !isUnknownCommand(authProbe)
+  const authSupported = !isUnknownCommand(authProbe)
   if (authProbe.ok && authSupported) {
     try {
       auth = JSON.parse(authProbe.stdout)
@@ -586,7 +721,7 @@ async function readGatewayProbe() {
   }
 }
 
-const handlers: Record<string, (args: any) => unknown | Promise<unknown>> = {
+const handlers: Record<string, (args: any) => unknown> = {
   // ── Boot path ──
   //
   // Answers from cache so the first frame is not waiting on the CLI. A
@@ -654,7 +789,11 @@ const handlers: Record<string, (args: any) => unknown | Promise<unknown>> = {
   [IPC.RESPOND_PERMISSION]: ({ tabId, questionId, optionId }: any) =>
     controlPlane.respondToPermission(tabId, questionId, optionId),
   [IPC.STATUS]: () => controlPlane.getHealth(),
-  [IPC.TAB_HEALTH]: ({ tabId }: any) => controlPlane.getTabStatus(tabId) ?? null,
+  // `tabHealth()` takes no argument, so this used to destructure `tabId` out of
+  // an empty object and answer `getTabStatus(undefined) ?? null`. The renderer's
+  // reconciliation loop reads `health.tabs`, found `null`, and returned early
+  // every 1.5s — tabs stuck on "running" after the CLI died were never unstuck.
+  [IPC.TAB_HEALTH]: () => controlPlane.getHealth(),
   [IPC.GET_CONNECTION_TARGET]: () => controlPlane.getConnectionTarget(),
   [IPC.SET_CONNECTION_TARGET]: (target: any) => {
     // Ported from src/main/index.ts:2286-2328. The previous one-liner passed
@@ -767,7 +906,7 @@ const handlers: Record<string, (args: any) => unknown | Promise<unknown>> = {
     return r
   },
   [IPC.OPENCLAW_ONBOARD]: () => runCli(['onboard'], 60000),
-  [IPC.OPENCLAW_RUN]: ({ args }: any) => runCli(Array.isArray(args) ? args.map(String) : [], 60000),
+  [IPC.OPENCLAW_RUN]: ({ action }: any) => runOpenclawAction(String(action ?? '')),
 
   // Returns NodeHostStatus (src/shared/types.ts) by parsing the CLI's
   // human-readable output. Returning raw stdout left the panel showing
@@ -889,25 +1028,11 @@ const handlers: Record<string, (args: any) => unknown | Promise<unknown>> = {
   },
 
   // ── Sessions: read the CLI's own session directories ──
-  [IPC.LIST_SESSIONS]: async () => {
-    const out: unknown[] = []
-    for (const home of getAgentDataHomes()) {
-      const root = join(home, 'projects')
-      try {
-        for (const dir of await readdir(root)) {
-          const full = join(root, dir)
-          try {
-            out.push({ project: dir, path: full, mtime: (await stat(full)).mtimeMs })
-          } catch {
-            // unreadable entry, skip
-          }
-        }
-      } catch {
-        // no projects dir under this home
-      }
-    }
-    return out
-  },
+  // Returns SessionMeta[] (src/shared/types.ts). The port had this listing the
+  // project *directories* instead — objects with no sessionId — which the
+  // history picker then dereferenced, throwing and unmounting the whole app.
+  [IPC.LIST_SESSIONS]: ({ projectPath }: any) =>
+    listSessions(projectPath == null ? undefined : String(projectPath)),
   [IPC.LOAD_SESSION]: async ({ sessionId, projectPath }: any) => {
     try {
       return { ok: true, content: await readFileAsync(join(String(projectPath), `${sessionId}.jsonl`), 'utf-8') }
@@ -1101,7 +1226,7 @@ void (async () => {
   const wired = Object.keys(handlers).filter((k) => all.includes(k)).length
   log(`ready on node ${process.version}; ${wired}/${all.length} channels wired`)
   // The shell waits for this before navigating, so the server is guaranteed up.
-  emit('sidecar:ready', { nodeVersion: process.version, wired, total: all.length, webPort: WEB_PORT })  // single object arg, now safe
+  emit('sidecar:ready', { nodeVersion: process.version, wired, total: all.length, webPort })  // single object arg, now safe
 }
 
 // ─── Skill provisioning ───

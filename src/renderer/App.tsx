@@ -84,7 +84,7 @@ export default function App() {
   }, [setSystemTheme])
 
   useEffect(() => {
-    useSessionStore.getState().initStaticInfo().then(() => {
+    void useSessionStore.getState().initStaticInfo().then(() => {
       const homeDir = useSessionStore.getState().staticInfo?.homePath || '~'
       const tab = useSessionStore.getState().tabs[0]
       if (tab) {
@@ -176,7 +176,7 @@ export default function App() {
       let stableFrames = 0
       let lastSig = ''
       const settle = (): void => {
-        const el = document.querySelector('[data-clui-shell]') as HTMLElement | null
+        const el = document.querySelector('[data-clui-shell]')
         const r = el?.getBoundingClientRect()
         const sig = r ? `${Math.round(r.width)}x${Math.round(r.height)}@${Math.round(r.y)}` : 'none'
         stableFrames = sig === lastSig ? stableFrames + 1 : 0
@@ -385,7 +385,12 @@ export default function App() {
   // panel itself is additionally capped to the viewport.
   const takeoverOpen = controlCenterOpen || marketplaceOpen || skillBuilderOpen
   const bodyMaxHeight = takeoverOpen ? 150 : metrics.bodyMaxHeight
-  const panelMaxHeight = 'min(560px, calc(100vh - 300px))'
+  // The 300px reserve is the column below a takeover panel: the shell card
+  // (~200 at bodyMaxHeight), the input row (~60), and the panel's own margin.
+  // The ceiling is what the panels are designed for; `100vh` is what the shell
+  // could actually give, which on a short screen is less.
+  const panelMaxHeight = 'min(640px, calc(100vh - 300px))'
+  const marketplaceMaxHeight = 'min(560px, calc(100vh - 300px))'
 
   const handleScreenshot = useCallback(async () => {
     const result = await window.clui.takeScreenshot()
@@ -427,7 +432,7 @@ export default function App() {
             >
               <OnboardingPanel
                 info={onboardingInfo}
-                onOpenTerminal={() => { window.clui.openInTerminal(null, onboardingInfo.homePath) }}
+                onOpenTerminal={() => { void window.clui.openInTerminal(null, onboardingInfo.homePath) }}
                 onPickWorkspace={handlePickWorkspace}
                 onOpenMarketplace={() => useSessionStore.getState().toggleMarketplace()}
                 onOpenControlCenter={() => useSessionStore.getState().openControlCenter('settings')}
@@ -450,8 +455,8 @@ export default function App() {
                 data-clui-ui
                 data-tour="control-center-panel"
                 style={{
-                  width: 920,
-                  maxWidth: 920,
+                  width: 1040,
+                  maxWidth: 1040,
                   marginLeft: '50%',
                   transform: 'translateX(-50%)',
                   marginBottom: 14,
@@ -487,8 +492,8 @@ export default function App() {
                 data-clui-ui
                 data-tour="marketplace-panel"
                 style={{
-                  width: 720,
-                  maxWidth: 720,
+                  width: 860,
+                  maxWidth: 860,
                   marginLeft: '50%',
                   transform: 'translateX(-50%)',
                   marginBottom: 14,
@@ -507,7 +512,7 @@ export default function App() {
                     className="glass-surface overflow-hidden no-drag"
                     style={{
                       borderRadius: 24,
-                      maxHeight: `min(470px, calc(100vh - 300px))`,
+                      maxHeight: marketplaceMaxHeight,
                       minHeight: 0,
                       display: 'flex',
                       flexDirection: 'column',
@@ -523,8 +528,8 @@ export default function App() {
               <div
                 data-clui-ui
                 style={{
-                  width: 920,
-                  maxWidth: 920,
+                  width: 1040,
+                  maxWidth: 1040,
                   marginLeft: '50%',
                   transform: 'translateX(-50%)',
                   marginBottom: 14,

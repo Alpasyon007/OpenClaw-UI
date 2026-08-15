@@ -355,7 +355,7 @@ function paletteFor(theme: Theme, isDark: boolean): ColorPalette {
   try {
     const seeds = isDark ? theme.dark : theme.light
     const overrides = isDark ? theme.overrides?.dark : theme.overrides?.light
-    return derivePalette(seeds, theme.effects, isDark, overrides as Partial<ColorPalette> | undefined)
+    return derivePalette(seeds, theme.effects, isDark, overrides)
   } catch {
     // A malformed theme must never leave the app unrenderable.
     return isDark ? darkColors : lightColors

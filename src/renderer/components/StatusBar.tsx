@@ -1,6 +1,7 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react'
 import { createPortal } from 'react-dom'
-import { motion, AnimatePresence } from 'framer-motion'
+import { useShallow } from 'zustand/react/shallow'
+import { motion } from 'framer-motion'
 import { Terminal, CaretDown, Check, FolderOpen, Plus, X, ShieldCheck } from '@phosphor-icons/react'
 import { useSessionStore, getModelDisplayLabel } from '../stores/sessionStore'
 import { usePopoverLayer } from './PopoverLayer'
@@ -14,9 +15,15 @@ function ModelPicker() {
   const setOpenclawModel = useSessionStore((s) => s.setOpenclawModel)
   const openclawModels = useSessionStore((s) => s.openclawModels)
   const activeProvider = useSessionStore((s) => s.activeProvider)
+  // Zustand 5 dropped the second `equalityFn` argument: passing one is silently
+  // ignored, which turned this into a plain reference comparison against a
+  // freshly built tab object and re-rendered the picker on every stream chunk.
+  // Selecting the two fields it actually reads restores the intent.
   const tab = useSessionStore(
-    (s) => s.tabs.find((t) => t.id === s.activeTabId),
-    (a, b) => a === b || (!!a && !!b && a.status === b.status && a.sessionModel === b.sessionModel),
+    useShallow((s) => {
+      const t = s.tabs.find((t) => t.id === s.activeTabId)
+      return { status: t?.status, sessionModel: t?.sessionModel }
+    }),
   )
   const popoverLayer = usePopoverLayer()
   const colors = useColors()
@@ -287,15 +294,22 @@ function compactPath(fullPath: string): string {
 }
 
 export function StatusBar() {
+  // See ModelPicker: the old equalityFn argument is inert under Zustand 5.
+  // `messages` is deliberately reduced to a boolean — the bar only asks whether
+  // the transcript is empty, and holding the array would re-render the whole
+  // status bar on every streamed chunk.
   const tab = useSessionStore(
-    (s) => s.tabs.find((t) => t.id === s.activeTabId),
-    (a, b) => a === b || (!!a && !!b
-      && a.status === b.status
-      && a.additionalDirs === b.additionalDirs
-      && a.hasChosenDirectory === b.hasChosenDirectory
-      && a.workingDirectory === b.workingDirectory
-      && a.claudeSessionId === b.claudeSessionId
-    ),
+    useShallow((s) => {
+      const t = s.tabs.find((t) => t.id === s.activeTabId)
+      if (!t) return null
+      return {
+        status: t.status,
+        additionalDirs: t.additionalDirs,
+        hasChosenDirectory: t.hasChosenDirectory,
+        workingDirectory: t.workingDirectory,
+        claudeSessionId: t.claudeSessionId,
+      }
+    }),
   )
   const addDirectory = useSessionStore((s) => s.addDirectory)
   const removeDirectory = useSessionStore((s) => s.removeDirectory)
@@ -323,11 +337,10 @@ export function StatusBar() {
   if (!tab) return null
 
   const isRunning = tab.status === 'running' || tab.status === 'connecting'
-  const isEmpty = tab.messages.length === 0
   const hasExtraDirs = tab.additionalDirs.length > 0
 
   const handleOpenInTerminal = () => {
-    window.clui.openInTerminal(tab.claudeSessionId, tab.workingDirectory)
+    void window.clui.openInTerminal(tab.claudeSessionId, tab.workingDirectory)
   }
 
   const handleDirClick = () => {

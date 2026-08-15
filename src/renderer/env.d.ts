@@ -1,9 +1,7 @@
 import type { CluiAPI } from '../shared/clui-contract'
 
-declare module '*.mp3' {
-  const src: string
-  export default src
-}
+// Asset module declarations live in assets.d.ts — a wildcard `declare module`
+// only works from a file that is not itself a module, and this one is.
 
 declare global {
   interface Window {

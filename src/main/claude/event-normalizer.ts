@@ -7,7 +7,6 @@ import type {
   ResultEvent,
   RateLimitEvent,
   PermissionEvent,
-  ContentDelta,
 } from '../../shared/types'
 
 /**
@@ -76,7 +75,7 @@ function normalizeStreamEvent(event: StreamEvent): NormalizedEvent[] {
     }
 
     case 'content_block_delta': {
-      const delta = sub.delta as ContentDelta
+      const delta = sub.delta
       if (delta.type === 'text_delta') {
         return [{ type: 'text_chunk', text: delta.text }]
       }

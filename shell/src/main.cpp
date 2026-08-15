@@ -26,6 +26,7 @@
 #include <thread>
 #include <vector>
 #include <functional>
+#include <algorithm>
 #include <cstdlib>
 #include <filesystem>
 
@@ -48,10 +49,20 @@ namespace
 {
     constexpr auto kTransparent = saucer::color{.r = 0, .g = 0, .b = 0, .a = 0};
 
-    // Matches the Electron launcher's geometry.
-    constexpr int kWinWidth     = 1040;
-    constexpr int kWinHeight    = 720;
+    // Preferred geometry. Both are ceilings, not promises: the window is
+    // clamped to the primary work area below, so a laptop screen gets a
+    // smaller launcher rather than one whose top is off the display.
+    //
+    // Grown from the Electron launcher's 1040x720 because the takeover panels
+    // (Control Center, marketplace, skill builder) never had the room they were
+    // designed for. The renderer sizes them with `calc(100vh - 300px)`, so at
+    // 720 the 560px-tall panels were being cut to 420 and their content had to
+    // be scrolled to reach — the Appearance tab alone hid 1057px of itself.
+    constexpr int kWinWidth     = 1200;
+    constexpr int kWinHeight    = 940;
     constexpr int kBottomMargin = 24;
+    /** Breathing room kept above the launcher when the work area is short. */
+    constexpr int kTopMargin    = 24;
 
     fs::path exe_dir()
     {
@@ -168,12 +179,36 @@ coco::stray start(saucer::application *app)
                 outer_h = wr.bottom - wr.top;
             }
 
+            // Clamp to the work area. The preferred size suits a desktop
+            // display; on a short screen an unclamped 940px window would hang
+            // off the top, and the top is exactly where the takeover panels
+            // live. Shrinking instead costs nothing — the renderer lays the
+            // panels out from `100vh`, so they simply come back smaller.
+            const auto frame_w = outer_w - kWinWidth;
+            const auto frame_h = outer_h - kWinHeight;
+            const auto avail_w = (work.right - work.left) - frame_w;
+            const auto avail_h = (work.bottom - work.top) - frame_h - kBottomMargin - kTopMargin;
+            // std::clamp, not std::min/std::max: <windows.h> defines min and
+            // max as function-like macros, so `std::min(` fails to compile here.
+            // Cast back to int: the work-area arithmetic is LONG, and
+            // set_size's designated initialisers would reject the narrowing.
+            const auto client_w = static_cast<int>(std::clamp(avail_w, 320L, static_cast<LONG>(kWinWidth)));
+            const auto client_h = static_cast<int>(std::clamp(avail_h, 360L, static_cast<LONG>(kWinHeight)));
+            if (client_w != kWinWidth || client_h != kWinHeight)
+            {
+                window->set_size({.w = client_w, .h = client_h});
+                trace("clamped to work area: " + std::to_string(client_w) + "x" +
+                      std::to_string(client_h));
+            }
+            outer_w = client_w + frame_w;
+            outer_h = client_h + frame_h;
+
             window->set_position({
                 .x = work.left + ((work.right - work.left) - outer_w) / 2,
                 .y = work.bottom - outer_h - kBottomMargin,
             });
-            trace("frame delta " + std::to_string(outer_w - kWinWidth) + "x" +
-                  std::to_string(outer_h - kWinHeight));
+            trace("frame delta " + std::to_string(frame_w) + "x" + std::to_string(frame_h) +
+                  "; client " + std::to_string(client_w) + "x" + std::to_string(client_h));
             trace("primary work area " + std::to_string(work.left) + "," + std::to_string(work.top) +
                   " " + std::to_string(work.right - work.left) + "x" +
                   std::to_string(work.bottom - work.top));

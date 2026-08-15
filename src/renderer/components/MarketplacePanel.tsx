@@ -1,9 +1,22 @@
-import React, { useState, useMemo, useCallback, useRef, useEffect } from 'react'
-import { motion, AnimatePresence } from 'framer-motion'
+import React, { useState, useMemo, useCallback, useRef, useEffect, useDeferredValue } from 'react'
+import { motion } from 'framer-motion'
 import { X, MagnifyingGlass, SpinnerGap, ArrowClockwise, HeadCircuit, Compass, GithubLogo } from '@phosphor-icons/react'
 import { useSessionStore } from '../stores/sessionStore'
 import { useColors } from '../theme'
 import type { CatalogPlugin, PluginStatus } from '../../shared/types'
+
+/**
+ * How many cards are mounted at once, and how many more each time the reader
+ * reaches the bottom.
+ *
+ * The catalogue is not small — the community feed alone is capped at 1400
+ * entries — and every card is a `layout` motion component, so framer measures
+ * and re-projects each one on every commit. Rendering the whole list put ~21k
+ * nodes in the DOM and made a single keystroke in the search box cost 180-330ms
+ * of blocking main-thread work; with the launcher being a transparent
+ * always-on-top window, that stall is visible system-wide, not just in the app.
+ */
+const PAGE_SIZE = 40
 
 export function MarketplacePanel() {
   const colors = useColors()
@@ -18,6 +31,11 @@ export function MarketplacePanel() {
   const setFilter = useSessionStore((s) => s.setMarketplaceFilter)
   const loadMarketplace = useSessionStore((s) => s.loadMarketplace)
   const buildYourOwn = useSessionStore((s) => s.buildYourOwn)
+  // Selected once here rather than inside every card: these are stable zustand
+  // actions, and a per-card selector would add two store subscriptions per row
+  // that fire on every unrelated state change (including each streaming token).
+  const installPlugin = useSessionStore((s) => s.installMarketplacePlugin)
+  const uninstallPlugin = useSessionStore((s) => s.uninstallMarketplacePlugin)
 
   const [expandedId, setExpandedId] = useState<string | null>(null)
   const scrollContainerRef = useRef<HTMLDivElement>(null)
@@ -34,12 +52,15 @@ export function MarketplacePanel() {
     const sorted = [...tagCounts.entries()]
       .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
       .map(([tag]) => tag)
-    return ['All', ...sorted, 'Installed']
+    // 'All' and 'Installed' are special chips, not tags. Deduped so a catalogue
+    // tag that happens to share their text cannot produce two chips with the
+    // same React key — and the special one keeps its meaning.
+    return [...new Set(['All', ...sorted, 'Installed'])]
   }, [catalog])
 
   // Debounced search
   const [localSearch, setLocalSearch] = useState(search)
-  const debounceRef = useRef<ReturnType<typeof setTimeout>>()
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
   const handleSearchChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     const val = e.target.value
     setLocalSearch(val)
@@ -49,45 +70,96 @@ export function MarketplacePanel() {
 
   useEffect(() => () => clearTimeout(debounceRef.current), [])
 
+  // Keeps the caret responsive: the input paints from localSearch immediately,
+  // and React re-filters the (large) list against the deferred value at lower
+  // priority. The debounce above only syncs the store, which nothing on this
+  // render path reads — so it never did any filtering work on its own.
+  const deferredSearch = useDeferredValue(localSearch)
+
+  // One lowercased haystack per plugin, rebuilt only when the catalogue does.
+  // Doing this per keystroke meant six toLowerCase() calls across every entry.
+  const haystacks = useMemo(() => {
+    const m = new Map<string, string>()
+    for (const p of catalog) {
+      const tags = Array.isArray(p.tags) ? p.tags.map((t) => String(t)) : []
+      // NUL-joined so a match can never straddle two fields.
+      m.set(p.id, [p.name, p.description, ...tags, p.author, p.repo, p.marketplace]
+        .filter(Boolean).join('\u0000').toLowerCase())
+    }
+    return m
+  }, [catalog])
+
   // Filtered plugins
-  const lowerSearch = localSearch.toLowerCase()
   const filtered = useMemo(() => {
+    const q = deferredSearch.toLowerCase()
     return catalog.filter((p) => {
-      const pluginName = (p.name || '').toLowerCase()
-      const pluginDescription = (p.description || '').toLowerCase()
-      const pluginTags = Array.isArray(p.tags) ? p.tags : []
-      const matchesSearch = !lowerSearch ||
-        pluginName.includes(lowerSearch) ||
-        pluginDescription.includes(lowerSearch) ||
-        pluginTags.some((t) => String(t).toLowerCase().includes(lowerSearch)) ||
-        (p.author || '').toLowerCase().includes(lowerSearch) ||
-        (p.repo || '').toLowerCase().includes(lowerSearch) ||
-        (p.marketplace || '').toLowerCase().includes(lowerSearch)
-      const matchesFilter =
-        filter === 'All' ||
-        (filter === 'Installed' && pluginStates[p.id] === 'installed') ||
-        pluginTags.includes(filter)
-      return matchesSearch && matchesFilter
+      if (q && !(haystacks.get(p.id) ?? '').includes(q)) return false
+      if (filter === 'All') return true
+      if (filter === 'Installed') return pluginStates[p.id] === 'installed'
+      return Array.isArray(p.tags) && p.tags.includes(filter)
     })
-  }, [catalog, lowerSearch, filter, pluginStates])
+  }, [catalog, haystacks, deferredSearch, filter, pluginStates])
+
+  // ─── Windowed rendering ───
+  const [visibleCount, setVisibleCount] = useState(PAGE_SIZE)
+
+  // A new result set starts from the top again. Adjusted during render rather
+  // than in an effect so the collapsed window is what actually gets committed
+  // — an effect would paint the previous, longer list for a frame first.
+  const resultKey = `${deferredSearch}\u0000${filter}`
+  const [lastResultKey, setLastResultKey] = useState(resultKey)
+  if (resultKey !== lastResultKey) {
+    setLastResultKey(resultKey)
+    setVisibleCount(PAGE_SIZE)
+  }
+
+  useEffect(() => {
+    scrollContainerRef.current?.scrollTo({ top: 0 })
+  }, [resultKey])
+
+  const hasMore = visibleCount < filtered.length
+
+  /**
+   * Grow the window as the reader nears the bottom.
+   *
+   * A scroll check rather than an IntersectionObserver on purpose: this shell
+   * parks its window off-screen instead of hiding it, and a document that
+   * reports `visibilityState: 'hidden'` stops delivering intersection
+   * callbacks entirely — the list would simply stop growing, with nothing to
+   * show for it. Scroll events have no such dependency on compositing.
+   */
+  const totalCount = filtered.length
+  const handleBodyScroll = useCallback((e: React.UIEvent<HTMLDivElement>) => {
+    const el = e.currentTarget
+    if (el.scrollHeight - el.scrollTop - el.clientHeight > 240) return
+    setVisibleCount((c) => (c < totalCount ? c + PAGE_SIZE : c))
+  }, [totalCount])
 
   // Reorder cards so expanded card sits on a full-width row with no grid gaps.
   // If the expanded card was in the right column (odd index), its left neighbor
   // drops below it to fill the next row — no empty cells.
   const displayOrder = useMemo(() => {
-    if (expandedId === null) return filtered
-    const idx = filtered.findIndex((p) => p.id === expandedId)
-    if (idx === -1) return filtered
-    const expanded = filtered[idx]
-    const before = filtered.slice(0, idx)
-    const after = filtered.slice(idx + 1)
+    // Slice first: only the mounted window can contain the expanded card, and
+    // reordering the full result set would rebuild a 1400-entry array per click.
+    const window = filtered.slice(0, visibleCount)
+    if (expandedId === null) return window
+    const idx = window.findIndex((p) => p.id === expandedId)
+    if (idx === -1) return window
+    const expanded = window[idx]
+    const before = window.slice(0, idx)
+    const after = window.slice(idx + 1)
     if (idx % 2 === 1 && before.length > 0) {
       // Odd index (right column): move left neighbor to after the expanded card
       const leftNeighbor = before.pop()!
       return [...before, expanded, leftNeighbor, ...after]
     }
     return [...before, expanded, ...after]
-  }, [filtered, expandedId])
+  }, [filtered, visibleCount, expandedId])
+
+  // Stable identity, so a card only re-renders when its own props change.
+  const handleToggleExpand = useCallback((id: string) => {
+    setExpandedId((current) => (current === id ? null : id))
+  }, [])
 
   return (
     <div
@@ -97,7 +169,7 @@ export function MarketplacePanel() {
         // which would push the panel off the top of a bottom-anchored window.
         flex: 1,
         minHeight: 0,
-        maxHeight: 470,
+        maxHeight: 560,
         display: 'flex',
         flexDirection: 'column',
       }}
@@ -107,6 +179,7 @@ export function MarketplacePanel() {
         display: 'flex', alignItems: 'center', justifyContent: 'space-between',
         padding: '16px 18px 10px',
         borderBottom: `1px solid ${colors.containerBorder}`,
+        flexShrink: 0,
       }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
           <HeadCircuit size={20} weight="regular" style={{ color: colors.accent }} />
@@ -156,7 +229,7 @@ export function MarketplacePanel() {
       </div>
 
       {/* Search + Build your own */}
-      <div style={{ padding: '12px 18px 10px', display: 'flex', gap: 8, alignItems: 'center' }}>
+      <div style={{ padding: '12px 18px 10px', display: 'flex', gap: 8, alignItems: 'center', flexShrink: 0 }}>
         <div style={{
           display: 'flex',
           alignItems: 'center',
@@ -213,8 +286,19 @@ export function MarketplacePanel() {
         display: 'flex',
         gap: 8,
         padding: '0 18px 12px',
-        overflowX: 'auto',
-        scrollbarWidth: 'none',
+        // Wraps rather than scrolls. The chip set is derived from the catalogue
+        // and runs to ~21 entries (1354px of them); in a single scrolling strip
+        // with `scrollbar-width: none` the last eleven were simply not visible,
+        // and nothing on screen said they existed. Wrapping costs one extra row
+        // of height and puts every filter in view.
+        flexWrap: 'wrap',
+        rowGap: 8,
+        // Fixed chrome: it must not flex. It previously did, and because
+        // `overflow-x: auto` had made it a scroll container — whose automatic
+        // minimum size is 0 — it was the only row here that could shrink to
+        // nothing, so it absorbed the whole deficit and collapsed the chips
+        // from 31px tall to 14px, clipping their labels.
+        flexShrink: 0,
       }}>
         {filters.map((f) => (
           <button
@@ -224,6 +308,7 @@ export function MarketplacePanel() {
               fontSize: 11,
               fontWeight: 600,
               padding: '6px 11px',
+              flexShrink: 0,
               borderRadius: 999,
               border: `1px solid ${filter === f ? colors.accent : colors.containerBorder}`,
               background: filter === f ? colors.accentLight : 'transparent',
@@ -240,7 +325,7 @@ export function MarketplacePanel() {
       </div>
 
       {/* Body */}
-      <div ref={scrollContainerRef} style={{ flex: 1, overflowY: 'auto', padding: '0 18px', scrollbarWidth: 'thin' }}>
+      <div ref={scrollContainerRef} onScroll={handleBodyScroll} style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: '0 18px', scrollbarWidth: 'thin' }}>
         {loading ? (
           <LoadingState colors={colors} />
         ) : error ? (
@@ -248,28 +333,42 @@ export function MarketplacePanel() {
         ) : filtered.length === 0 ? (
           <EmptyState colors={colors} />
         ) : (
-          <div
-            style={{
-              display: 'flex',
-              flexWrap: 'wrap',
-              gap: 10,
-              paddingBottom: 6,
-            }}
-          >
-            {displayOrder.map((plugin) => (
-              <PluginCard
-                key={plugin.id}
-                plugin={plugin}
-                status={pluginStates[plugin.id] || 'not_installed'}
-                colors={colors}
-                expanded={expandedId === plugin.id}
-                scrollContainerRef={scrollContainerRef}
-                onToggleExpand={() => {
-                  setExpandedId(expandedId === plugin.id ? null : plugin.id)
+          <>
+            <div
+              style={{
+                display: 'flex',
+                flexWrap: 'wrap',
+                gap: 10,
+                paddingBottom: 6,
+              }}
+            >
+              {displayOrder.map((plugin) => (
+                <PluginCard
+                  key={plugin.id}
+                  plugin={plugin}
+                  status={pluginStates[plugin.id] || 'not_installed'}
+                  colors={colors}
+                  expanded={expandedId === plugin.id}
+                  scrollContainerRef={scrollContainerRef}
+                  onToggleExpand={handleToggleExpand}
+                  installPlugin={installPlugin}
+                  uninstallPlugin={uninstallPlugin}
+                />
+              ))}
+            </div>
+            {hasMore && (
+              <div
+                style={{
+                  padding: '10px 0 14px',
+                  textAlign: 'center',
+                  fontSize: 10,
+                  color: colors.textTertiary,
                 }}
-              />
-            ))}
-          </div>
+              >
+                Loading {filtered.length - visibleCount} more…
+              </div>
+            )}
+          </>
         )}
       </div>
 
@@ -279,19 +378,24 @@ export function MarketplacePanel() {
 
 // ─── PluginCard ───
 
-function PluginCard({ plugin, status, colors, expanded, onToggleExpand, scrollContainerRef }: {
+type StoreActions = ReturnType<typeof useSessionStore.getState>
+
+const PluginCard = React.memo(function PluginCard({
+  plugin, status, colors, expanded, onToggleExpand, scrollContainerRef, installPlugin, uninstallPlugin,
+}: {
   plugin: CatalogPlugin
   status: PluginStatus
   colors: ReturnType<typeof useColors>
   expanded: boolean
-  onToggleExpand: () => void
+  onToggleExpand: (id: string) => void
   scrollContainerRef: React.RefObject<HTMLDivElement | null>
+  installPlugin: StoreActions['installMarketplacePlugin']
+  uninstallPlugin: StoreActions['uninstallMarketplacePlugin']
 }) {
   const [showConfirm, setShowConfirm] = useState(false)
-  const installPlugin = useSessionStore((s) => s.installMarketplacePlugin)
-  const uninstallPlugin = useSessionStore((s) => s.uninstallMarketplacePlugin)
   const cardRef = useRef<HTMLDivElement>(null)
   const needsScrollRef = useRef(false)
+  const toggleExpand = useCallback(() => onToggleExpand(plugin.id), [onToggleExpand, plugin.id])
 
   useEffect(() => {
     if (expanded) needsScrollRef.current = true
@@ -312,22 +416,24 @@ function PluginCard({ plugin, status, colors, expanded, onToggleExpand, scrollCo
 
   const handleInstallClick = (e: React.MouseEvent) => {
     e.stopPropagation()
+    // Already on the gateway — there is nothing to install.
+    if (plugin.installMode === 'gateway') return
     if (plugin.installMode === 'clawhub') {
-      if (status === 'failed' || status === 'not_installed') installPlugin(plugin)
+      if (status === 'failed' || status === 'not_installed') void installPlugin(plugin)
       return
     }
     if (status === 'failed') {
-      installPlugin(plugin)
+      void installPlugin(plugin)
     } else {
       setShowConfirm(true)
-      if (!expanded) onToggleExpand()
+      if (!expanded) toggleExpand()
     }
   }
 
   const handleConfirm = (e: React.MouseEvent) => {
     e.stopPropagation()
     setShowConfirm(false)
-    installPlugin(plugin)
+    void installPlugin(plugin)
   }
 
   const handleCancel = (e: React.MouseEvent) => {
@@ -338,7 +444,7 @@ function PluginCard({ plugin, status, colors, expanded, onToggleExpand, scrollCo
   const handleGithubClick = (e: React.MouseEvent) => {
     e.stopPropagation()
     const url = `https://github.com/${plugin.repo || 'unknown/repo'}/tree/main/${plugin.sourcePath || ''}`
-    window.clui.openExternal(url)
+    void window.clui.openExternal(url)
   }
 
   // Collapse → clear confirm
@@ -356,6 +462,7 @@ function PluginCard({ plugin, status, colors, expanded, onToggleExpand, scrollCo
   const safeVersion = plugin.version || 'n/a'
   const installMode = plugin.installMode || 'native'
   const isClawhubSkill = installMode === 'clawhub'
+  const isGatewaySkill = installMode === 'gateway'
   const installCommand = plugin.installCommand
     || (isClawhubSkill
       ? `clawhub install ${plugin.installName}`
@@ -363,7 +470,16 @@ function PluginCard({ plugin, status, colors, expanded, onToggleExpand, scrollCo
         ? `~/.openclaw/skills/${plugin.installName}/SKILL.md`
         : `openclaw plugin install ${plugin.installName}@${safeMarketplaceSlug}`)
 
-  const githubButton = (
+  // A gateway skill has no repo or semver — "unknown/repo · by … · vn/a" was
+  // three pieces of non-information. Say where it actually came from instead.
+  const metaLine = isGatewaySkill
+    ? [plugin.gatewaySource || safeAuthor, 'on your gateway', plugin.gatewayBlockReason]
+      .filter(Boolean).join(' · ')
+    : `${safeRepo} · by ${safeAuthor} · v${safeVersion}`
+
+  // Gateway skills have no source repo, so the GitHub link would resolve to
+  // `github.com//tree/main/` — a 404 dressed up as an action.
+  const githubButton = !plugin.repo ? null : (
     <button
       onClick={handleGithubClick}
       style={{
@@ -389,7 +505,7 @@ function PluginCard({ plugin, status, colors, expanded, onToggleExpand, scrollCo
       layout
       transition={{ duration: 0.22, ease: [0.25, 0.1, 0.25, 1] }}
       onLayoutAnimationComplete={handleLayoutComplete}
-      onClick={onToggleExpand}
+      onClick={toggleExpand}
       style={{
         padding: '12px',
         borderRadius: 14,
@@ -425,7 +541,7 @@ function PluginCard({ plugin, status, colors, expanded, onToggleExpand, scrollCo
             </div>
             <div style={{ flexShrink: 0, display: 'flex', alignItems: 'center', gap: 6 }}>
               {githubButton}
-              <StatusButton status={status} colors={colors} onClick={handleInstallClick} onUninstall={(e) => { e.stopPropagation(); uninstallPlugin(plugin) }} installMode={installMode} />
+              <StatusButton status={status} colors={colors} onClick={handleInstallClick} onUninstall={(e) => { e.stopPropagation(); void uninstallPlugin(plugin) }} installMode={installMode} gatewayReady={plugin.gatewayReady} />
             </div>
           </div>
 
@@ -441,7 +557,7 @@ function PluginCard({ plugin, status, colors, expanded, onToggleExpand, scrollCo
             {safeDescription}
           </div>
           <div style={{ fontSize: 10, color: colors.textTertiary, marginTop: 8 }}>
-            {safeRepo} · by {safeAuthor} · v{safeVersion}
+            {metaLine}
           </div>
 
           {/* Confirm panel or installing status */}
@@ -486,6 +602,43 @@ function PluginCard({ plugin, status, colors, expanded, onToggleExpand, scrollCo
             </div>
           )}
 
+          {isGatewaySkill && (
+            <div style={{
+              padding: '10px 12px', borderRadius: 10, marginTop: 10,
+              background: colors.surfacePrimary, border: `1px solid ${colors.containerBorder}`,
+            }}>
+              <div style={{ fontSize: 10, color: colors.textTertiary, marginBottom: 4 }}>
+                {plugin.gatewayReady === false
+                  ? `On your gateway but not ready — ${plugin.gatewayBlockReason ?? 'requirements unmet'}. Inspect it with:`
+                  : 'Already available on your gateway. Inspect it with:'}
+              </div>
+              <div style={{
+                fontSize: 10, fontFamily: 'monospace', color: colors.textSecondary,
+                background: colors.codeBg, padding: '4px 6px', borderRadius: 4,
+                lineHeight: 1.6,
+              }}>
+                {installCommand}
+              </div>
+              {plugin.externalUrl && (
+                <div style={{ marginTop: 8 }}>
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      void window.clui.openExternal(plugin.externalUrl!)
+                    }}
+                    style={{
+                      fontSize: 10, fontWeight: 600, padding: '4px 10px', borderRadius: 6,
+                      background: colors.accent, color: colors.textOnAccent, border: 'none',
+                      cursor: 'pointer', fontFamily: 'inherit',
+                    }}
+                  >
+                    Documentation
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
+
           {isClawhubSkill && (
             <div style={{
               padding: '10px 12px', borderRadius: 10, marginTop: 10,
@@ -506,7 +659,7 @@ function PluginCard({ plugin, status, colors, expanded, onToggleExpand, scrollCo
                   <button
                     onClick={(e) => {
                       e.stopPropagation()
-                      window.clui.openExternal(plugin.externalUrl!)
+                      void window.clui.openExternal(plugin.externalUrl!)
                     }}
                     style={{
                       fontSize: 10, fontWeight: 600, padding: '4px 10px', borderRadius: 6,
@@ -564,30 +717,51 @@ function PluginCard({ plugin, status, colors, expanded, onToggleExpand, scrollCo
               {safeDescription}
             </div>
             <div style={{ fontSize: 10, color: colors.textTertiary, marginTop: 8 }}>
-              {safeRepo} · by {safeAuthor} · v{safeVersion}
+              {metaLine}
             </div>
           </div>
           <div style={{ flexShrink: 0, display: 'flex', alignItems: 'center', gap: 6 }}>
             {githubButton}
-            <StatusButton status={status} colors={colors} onClick={handleInstallClick} onUninstall={(e) => { e.stopPropagation(); uninstallPlugin(plugin) }} installMode={installMode} />
+            <StatusButton status={status} colors={colors} onClick={handleInstallClick} onUninstall={(e) => { e.stopPropagation(); void uninstallPlugin(plugin) }} installMode={installMode} gatewayReady={plugin.gatewayReady} />
           </div>
         </div>
       )}
     </motion.div>
   )
-}
+})
 
 // ─── StatusButton ───
 
-function StatusButton({ status, colors, onClick, onUninstall, installMode }: {
+function StatusButton({ status, colors, onClick, onUninstall, installMode, gatewayReady }: {
   status: PluginStatus
   colors: ReturnType<typeof useColors>
   onClick: (e: React.MouseEvent) => void
   onUninstall?: (e: React.MouseEvent) => void
   installMode?: CatalogPlugin['installMode']
+  gatewayReady?: boolean
 }) {
   const [hovered, setHovered] = useState(false)
   const isClawhubSkill = installMode === 'clawhub'
+
+  // Gateway skills are managed by the runtime, not from here. A hover-to-
+  // Uninstall affordance would promise a local `rm -rf` of a directory that,
+  // under a remote gateway, is not even on this machine.
+  if (installMode === 'gateway') {
+    // Muted, not red: a skill waiting on a binary it has never had is inactive,
+    // not broken, and colouring it like a failure would misreport 28 of them.
+    const blocked = gatewayReady === false
+    return (
+      <span style={{
+        fontSize: 10, fontWeight: 600, padding: '2px 8px', borderRadius: 8,
+        background: blocked ? colors.surfacePrimary : colors.statusCompleteBg,
+        color: blocked ? colors.textTertiary : colors.statusComplete,
+        border: blocked ? `1px solid ${colors.containerBorder}` : 'none',
+        whiteSpace: 'nowrap',
+      }}>
+        {blocked ? 'Not ready' : 'On gateway'}
+      </span>
+    )
+  }
 
   if (isClawhubSkill) {
     if (status === 'installing') {

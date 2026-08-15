@@ -365,9 +365,23 @@ export interface CatalogPlugin {
   category: string        // 'Agent Skills' | 'Knowledge Work' | 'Financial Services'
   tags: string[]          // Semantic use-case tags derived from name/description (e.g. 'Design', 'Finance')
   isSkillMd: boolean      // true = individual SKILL.md (direct install), false = CLI plugin (bundle install)
-  installMode?: 'native' | 'clawhub'
+  /**
+   * How this entry gets installed — and 'gateway' means it already is.
+   *
+   * Gateway entries come from `openclaw skills list`, i.e. the runtime actually
+   * serving this install. None of OpenClaw's own bundled/extra/workspace skills
+   * appear in any of the browsable marketplace sources, so without this they
+   * were invisible here no matter how the installed-name matching was written.
+   */
+  installMode?: 'native' | 'clawhub' | 'gateway'
   installCommand?: string
   externalUrl?: string
+  /** Gateway entries only: which runtime the skill came from. */
+  gatewaySource?: string
+  /** Gateway entries only: false when present but not currently usable. */
+  gatewayReady?: boolean
+  /** Gateway entries only: why it is not ready, e.g. 'macOS only · needs memo'. */
+  gatewayBlockReason?: string
 }
 
 // ─── IPC Channel Names ───

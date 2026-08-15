@@ -17,16 +17,16 @@
 
 import { EventEmitter } from 'events'
 import { homedir } from 'os'
-import { join, delimiter, dirname } from 'path'
+import { join, delimiter } from 'path'
 import { appendFileSync, chmodSync, existsSync, statSync } from 'fs'
-import type { NormalizedEvent, RunOptions, EnrichedError } from '../../shared/types'
+import type { RunOptions, EnrichedError } from '../../shared/types'
 import { getCliEnv } from '../cli-env'
 import { getCliRuntime, type CliRuntime } from '../openclaw/runtime'
 
 // node-pty is a native module — require at runtime to avoid Vite bundling issues
-// eslint-disable-next-line @typescript-eslint/no-var-requires
 let pty: typeof import('node-pty')
 try {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
   pty = require('node-pty')
 } catch (err) {
   // Will be set when first needed — fail at startRun() time, not import time
@@ -48,7 +48,7 @@ function log(msg: string): void {
 /**
  * Strip ANSI escape sequences (colors, cursor movement, clear line, etc.)
  */
-function stripAnsi(str: string): string {
+export function stripAnsi(str: string): string {
   // Covers CSI sequences including private modes like ?2004h
   return str.replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, '')
     .replace(/\x1b\][^\x07]*\x07/g, '')  // OSC sequences
@@ -57,7 +57,7 @@ function stripAnsi(str: string): string {
     .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f]/g, '') // control chars except \n \r \t
 }
 
-function normalizeForMatch(input: string): { norm: string; map: number[] } {
+export function normalizeForMatch(input: string): { norm: string; map: number[] } {
   let norm = ''
   const map: number[] = []
   let lastSpace = false
@@ -98,7 +98,7 @@ interface ParsedPermission {
  * Looks at a window of cleaned terminal lines and tries to identify
  * a Claude permission prompt.
  */
-function detectPermissionPrompt(lines: string[]): ParsedPermission | null {
+export function detectPermissionPrompt(lines: string[]): ParsedPermission | null {
   const joined = lines.join('\n')
 
   // ─── Pattern 1: "Claude wants to use <ToolName>" or "Allow <ToolName>" ───
@@ -191,7 +191,7 @@ function detectPermissionPrompt(lines: string[]): ParsedPermission | null {
  * Try to extract a session ID from terminal output.
  * The interactive CLI may print session info at startup.
  */
-function extractSessionId(text: string): string | null {
+export function extractSessionId(text: string): string | null {
   // Pattern: "Session: <uuid>" or "session_id: <uuid>" or just a UUID in init context
   const match = text.match(/(?:session[_ ]?id|Session|Resuming session)[:\s]+([a-f0-9-]{36})/i)
   return match ? match[1] : null
@@ -205,7 +205,7 @@ function extractSessionId(text: string): string | null {
  *   "❯ "  or  "❯ ? for shortcuts"  or  "> "
  * After proper \r handling, the prompt should be a clean line.
  */
-function isInputPrompt(line: string): boolean {
+export function isInputPrompt(line: string): boolean {
   const cleaned = line.trim()
   if (cleaned === '❯' || cleaned === '>' || cleaned === '$') return true
   // Match prompt with trailing hint text (e.g. "❯ ? for shortcuts")
@@ -216,7 +216,7 @@ function isInputPrompt(line: string): boolean {
   return false
 }
 
-function isUiChrome(line: string): boolean {
+export function isUiChrome(line: string): boolean {
   const cleaned = line.trim()
   if (!cleaned) return true
   if (/^🦞\s+OpenClaw\b/i.test(cleaned)) return true
@@ -233,20 +233,40 @@ function isUiChrome(line: string): boolean {
   if (/^[╭│╰─┌└┃┏┗┐┘┤├┬┴┼]/.test(cleaned)) return true
   if (/^[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏✢✳✶✻✽]/.test(cleaned)) return true
   if (/^\s*(?:Medium|Low|High)\s/.test(cleaned) && /model/i.test(cleaned)) return true
-  if (/\/mcp|MCP server/i.test(cleaned)) return true
-  if (/Claude\s*Code\s*v/i.test(cleaned) || /ClaudeCodev/i.test(cleaned)) return true
+
+  // ─── Anchored rules ───
+  //
+  // Everything below used to match a bare substring anywhere in the line, which
+  // meant an ordinary answer mentioning "processing", "MCP server", "/doctor"
+  // or "Claude Max" was classified as chrome and dropped from the transcript
+  // with no trace. A status line always has a recognisable *shape* — it starts
+  // at the line boundary, or carries the status bar's `·` separator — so the
+  // rules match on that shape instead of on the vocabulary alone.
+
+  if (/^\/mcp\b/i.test(cleaned) || /^MCP server\b/i.test(cleaned)) return true
+  if (/^Claude\s*Code\s*v/i.test(cleaned) || /^ClaudeCodev/i.test(cleaned)) return true
   if (/^[❯>$]\s*$/.test(cleaned)) return true
   if (/^\$[\d.]+\s+·/.test(cleaned)) return true
-  if (/for\s*shortcuts/i.test(cleaned)) return true
-  if (/zigzagging|thinking|processing|nebulizing|Boondoggling/i.test(cleaned)) return true
   if (/^esctointerrupt/i.test(cleaned)) return true
-  // Prompt line with hint
-  if (/^[❯>]\s*\?\s*for\s*shortcuts/i.test(cleaned)) return true
-  // Status bar fragments: "Opus 4.6 · Claude Max" etc.
+
+  // Prompt line with hint: "❯ ? for shortcuts", never a sentence about them.
+  if (/^[❯>]?\s*\?\s*for\s+shortcuts\b/i.test(cleaned)) return true
+
+  // Spinner label. The glyph rule above catches these while the glyph survives
+  // ANSI stripping; this is the fallback for when it does not, so it needs the
+  // CLI's own timing suffix or interrupt hint to distinguish
+  // "✳ Thinking… (5s · esc to interrupt)" from "Here is my thinking".
+  if (
+    /^(?:zigzagging|thinking|processing|nebulizing|boondoggling)\b/i.test(cleaned) &&
+    (/\(\s*\d+s\b/.test(cleaned) || /\besc\s+to\s+interrupt\b/i.test(cleaned) || /^\w+[….]{1,3}$/.test(cleaned))
+  ) return true
+
+  // Status bar fragments: "Opus 4.6 · Claude Max" — the `·` is the giveaway.
   if (/Opus\s*[\d.]+\s*·/i.test(cleaned)) return true
-  if (/Claude\s*Max/i.test(cleaned)) return true
-  // Settings issue / doctor notice
-  if (/settings?\s*issue|\/doctor/i.test(cleaned)) return true
+  if (/·\s*Claude\s*Max\b/i.test(cleaned)) return true
+
+  // Settings issue / doctor notice, as its own line rather than in prose.
+  if (/^(?:settings?\s+issue\b|\/doctor\b)/i.test(cleaned)) return true
   // Horizontal rules (all dashes/box chars)
   if (/^[─━▪\-=]{4,}/.test(cleaned)) return true
   // Only box-drawing / decoration chars
@@ -268,7 +288,7 @@ function isUiChrome(line: string): boolean {
  * resolvable credential, the CLI resolves both itself and the secret never
  * leaves the config/environment.
  */
-function buildConnectionArgs(target: import('../../shared/types').ConnectionTarget | undefined): string[] {
+export function buildConnectionArgs(target: import('../../shared/types').ConnectionTarget | undefined): string[] {
   if (!target || target.mode === 'auto') return []
 
   if (target.mode === 'local') return ['--local']
@@ -299,7 +319,7 @@ function buildConnectionArgs(target: import('../../shared/types').ConnectionTarg
 }
 
 /** Mask credential values so the unconditional arg log never leaks a token. */
-function redactArgs(args: string[]): string[] {
+export function redactArgs(args: string[]): string[] {
   const secret = new Set(['--token', '--password'])
   return args.map((arg, i) => (i > 0 && secret.has(args[i - 1]) ? '<redacted>' : arg))
 }
@@ -309,7 +329,7 @@ function redactArgs(args: string[]): string[] {
  * These lines are otherwise classified as UI chrome and discarded, which is
  * why an unreachable gateway used to be invisible to the user.
  */
-function parseGatewayState(
+export function parseGatewayState(
   line: string,
 ): { state: import('../../shared/types').GatewayConnectionState; detail?: string } | null {
   const cleaned = line.trim()
@@ -333,7 +353,7 @@ function parseGatewayState(
  * Detect if a line looks like a tool call header from the interactive CLI.
  * Example: "⏳ Bash ls -la" or "✓ Read file.ts"
  */
-function parseToolCallLine(line: string): { toolName: string; input: string } | null {
+export function parseToolCallLine(line: string): { toolName: string; input: string } | null {
   // Pattern: emoji/spinner + tool name + optional input
   const match = line.match(/^\s*(?:⏳|✓|✗|⚡|🔧|Running|Executing)\s+([A-Za-z_][\w-]*)\s*(.*)$/i)
     || line.match(/^\s*(?:Tool|Using):\s*([A-Za-z_][\w-]*)\s*(.*)$/i)
@@ -453,6 +473,7 @@ export class PtyRunManager extends EventEmitter {
   private _ensureSpawnHelperExecutable(): void {
     try {
       const pkgPath = require.resolve('node-pty/package.json')
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
       const path = require('path') as typeof import('path')
       const helperPath = path.join(
         path.dirname(pkgPath),
@@ -586,7 +607,7 @@ export class PtyRunManager extends EventEmitter {
         mcpServers: [],
         skills: [],
         version: '',
-      } as NormalizedEvent)
+      })
     }
 
     // ─── PTY output parser pipeline ───
@@ -706,7 +727,7 @@ export class PtyRunManager extends EventEmitter {
           type: 'gateway_state',
           state: gw.state,
           detail: gw.detail,
-        } as NormalizedEvent)
+        })
       }
 
       if (/gateway\s+connected\s*\|\s*idle(?:\/exit)?\b/i.test(cleaned)) {
@@ -752,16 +773,12 @@ export class PtyRunManager extends EventEmitter {
           mcpServers: [],
           skills: [],
           version: '',
-        } as NormalizedEvent)
+        })
       }
     }
 
     // ─── Skip init/welcome output ───
     if (!handle.pastInit) {
-      const isPromptEcho = handle.promptSnippet
-        && cleaned.toLowerCase().startsWith(handle.promptSnippet)
-        && cleaned.length <= handle.promptSnippet.length + 2
-
       if (handle.openclawTuiMode) {
         if (!handle.promptKey) return
         const { norm, map } = normalizeForMatch(cleaned)
@@ -801,8 +818,11 @@ export class PtyRunManager extends EventEmitter {
 
     // ─── Permission phase: collecting detection context ───
     if (handle.permissionPhase === 'detecting' || handle.permissionPhase === 'idle') {
-      this._checkPermissionInBuffer(requestId, handle, cleaned)
-      if (handle.permissionPhase === 'waiting_user') {
+      // The detector reports whether it emitted, rather than the caller
+      // re-reading `permissionPhase`: after the `if` above, the compiler has
+      // narrowed that field to 'idle' | 'detecting' and cannot see the
+      // mutation, so the old check was statically dead.
+      if (this._checkPermissionInBuffer(requestId, handle, cleaned)) {
         return // Permission prompt detected and emitted
       }
     }
@@ -817,14 +837,14 @@ export class PtyRunManager extends EventEmitter {
         toolName: toolCall.toolName,
         toolId: `pty-tool-${handle.toolCallCount}`,
         index: handle.toolCallCount - 1,
-      } as NormalizedEvent)
+      })
 
       // Also emit tool_call_complete shortly after (we can't know exact timing from PTY)
       setTimeout(() => {
         this.emit('normalized', requestId, {
           type: 'tool_call_complete',
           index: handle.toolCallCount - 1,
-        } as NormalizedEvent)
+        })
       }, 100)
       return
     }
@@ -884,7 +904,7 @@ export class PtyRunManager extends EventEmitter {
         message: `${reason}. Check the gateway connection in Control Center.`,
         isError: true,
         sessionId: handle.sessionId || undefined,
-      } as NormalizedEvent)
+      })
       return
     }
 
@@ -897,7 +917,7 @@ export class PtyRunManager extends EventEmitter {
       numTurns: 1,
       usage: {},
       sessionId: handle.sessionId || '',
-    } as NormalizedEvent)
+    })
   }
 
   private _checkQuiescenceCompletion(requestId: string, handle: PtyRunHandle): void {
@@ -982,7 +1002,7 @@ export class PtyRunManager extends EventEmitter {
       this.emit('normalized', requestId, {
         type: 'text_chunk',
         text: handle.textAccumulator,
-      } as NormalizedEvent)
+      })
       handle.textAccumulator = ''
     }
   }
@@ -990,14 +1010,15 @@ export class PtyRunManager extends EventEmitter {
   /**
    * Check the current buffer for permission prompt patterns.
    */
-  private _checkPermissionInBuffer(requestId: string, handle: PtyRunHandle, currentLine: string): void {
+  /** @returns true when a permission prompt was detected and emitted. */
+  private _checkPermissionInBuffer(requestId: string, handle: PtyRunHandle, currentLine: string): boolean {
     // The detector below scores on Claude Code's Ink strings ("Claude wants to
     // use", "❯ Allow"), which the OpenClaw TUI never emits. Running it there
     // produces only false positives — and a false positive makes
     // respondToPermission() type Enter into the agent's message box.
     // Gateway-side approvals (exec.approval.*) are the correct mechanism and
     // are not reachable over this transport.
-    if (handle.openclawTuiMode) return
+    if (handle.openclawTuiMode) return false
 
     // Add current line to detection context
     const detectionWindow = [...handle.ptyBuffer.slice(-10), currentLine]
@@ -1009,7 +1030,7 @@ export class PtyRunManager extends EventEmitter {
       if (hasKeyword && handle.permissionPhase === 'idle') {
         handle.permissionPhase = 'detecting'
       }
-      return
+      return false
     }
 
     // Permission prompt detected!
@@ -1035,7 +1056,7 @@ export class PtyRunManager extends EventEmitter {
         label: o.label,
         kind: o.label.toLowerCase().includes('deny') || o.label.toLowerCase().includes('reject') ? 'deny' : 'allow',
       })),
-    } as NormalizedEvent)
+    })
 
     // Set timeout for user response
     handle.permissionTimeout = setTimeout(() => {
@@ -1044,7 +1065,7 @@ export class PtyRunManager extends EventEmitter {
         this.emit('normalized', requestId, {
           type: 'text_chunk',
           text: '\n[Permission timed out — automatically denied after 5 minutes]\n',
-        } as NormalizedEvent)
+        })
         // Send Escape to dismiss the prompt
         try {
           handle.pty.write('\x1b')
@@ -1053,6 +1074,8 @@ export class PtyRunManager extends EventEmitter {
         handle.pendingPermission = null
       }
     }, PERMISSION_TIMEOUT_MS)
+
+    return true
   }
 
   /**

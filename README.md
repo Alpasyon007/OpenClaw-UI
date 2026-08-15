@@ -106,10 +106,18 @@ is all you need unless you changed `shell/src`. Needs no C++ toolchain.
 | `npm run build` | Renderer bundle only → `dist/renderer` |
 | `npm run shim` | Regenerate `window.clui` from the contract |
 | `npm run sidecar` | Bundle the Node sidecar → `shell/sidecar/main.cjs` |
-| `npm run typecheck` | `tsc --noEmit` across `src/` and `sidecar/` |
+| `npm run typecheck` | `tsc --noEmit` across `src/`, `sidecar/` and `tests/` |
+| `npm run verify` | **The gate** — typecheck, lint, build, generated-file check, tests |
+| `npm run test` | Vitest, `--watch` and `--ui` variants available |
+| `npm run coverage` | Tests with a coverage report → `reports/` |
+| `npm run lint` | ESLint; must stay at zero errors |
+| `npm run check:generated` | Fail if the committed shim or sidecar bundle is stale |
 | `npm run doctor` | Environment diagnostic |
 | `./commands/bootstrap.command` | Environment check + install + renderer build |
 | `./commands/setup-git.command --origin <url>` | Set your GitHub remote for this fork |
+
+Run `npm run verify` before opening a PR; CI runs the same steps.
+See [`docs/TESTING.md`](docs/TESTING.md) for what each guard protects and why.
 
 ### The bridge contract
 
@@ -118,6 +126,12 @@ declares every channel; `sidecar/gen-shim.mjs` reads it and emits
 `shell/web/clui-shim.js`. Add a method to the contract and run `npm run shim` —
 if the channel is not in `src/shared/types.ts`, generation fails loudly rather
 than shipping a bridge that silently resolves to `undefined`.
+
+Generation is only half the guarantee: it cannot tell whether the *sidecar*
+answers what the contract sends. `tests/contract/bridge.test.ts` closes that gap
+by parsing the contract, the generated shim and the sidecar's handler map
+independently and asserting they agree — on which channels exist, and on the
+exact argument shape each handler destructures.
 
 </details>
 

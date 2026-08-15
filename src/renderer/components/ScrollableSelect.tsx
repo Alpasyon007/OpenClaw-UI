@@ -99,6 +99,9 @@ export function ScrollableSelect({
       window.removeEventListener('resize', onScrollOrResize)
       window.removeEventListener('scroll', onScrollOrResize, true)
     }
+    // reposition is recreated per render; the listeners below only need the
+    // latest one at open time.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, showFilter, options.length])
 
   useEffect(() => {
@@ -107,6 +110,9 @@ export function ScrollableSelect({
     navSourceRef.current = 'key'
     const idx = filtered.findIndex((o) => o.value === value)
     setActiveIndex(idx >= 0 ? idx : 0)
+    // Runs on open only: re-running as the filter narrows would yank the
+    // highlight back to the selected row while the user is typing.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open])
 
   // Keep the highlighted row inside the scroll viewport — but only when the

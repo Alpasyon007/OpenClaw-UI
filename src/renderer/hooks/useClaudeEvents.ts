@@ -1,6 +1,5 @@
 import { useEffect, useRef } from 'react'
 import { useSessionStore } from '../stores/sessionStore'
-import type { NormalizedEvent } from '../../shared/types'
 
 /**
  * Subscribes to all ControlPlane events via IPC and routes them
@@ -26,7 +25,7 @@ export function useClaudeEvents() {
 
       // Flush all accumulated text per tab in one go
       for (const [tabId, text] of buffer) {
-        handleNormalizedEvent(tabId, { type: 'text_chunk', text } as NormalizedEvent)
+        handleNormalizedEvent(tabId, { type: 'text_chunk', text })
       }
       buffer.clear()
     }
@@ -73,13 +72,14 @@ export function useClaudeEvents() {
       }
     })
 
+    const chunkBuffer = chunkBufferRef.current
     return () => {
       unsubEvent()
       unsubStatus()
       unsubError()
       unsubSkill()
       if (rafIdRef.current) cancelAnimationFrame(rafIdRef.current)
-      chunkBufferRef.current.clear()
+      chunkBuffer.clear()
     }
   }, [handleNormalizedEvent, handleStatusChange, handleError])
 

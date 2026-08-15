@@ -132,6 +132,20 @@ interface State {
 let msgCounter = 0
 const nextMsgId = () => `msg-${++msgCounter}`
 
+/**
+ * Index of the tool message still awaiting its result, or -1.
+ *
+ * Tool events carry a block index that is scoped to one assistant message, not
+ * to the transcript, so the only reliable association is "the most recent tool
+ * row that has not completed".
+ */
+function lastRunningToolIndex(messages: Message[]): number {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i].role === 'tool' && messages[i].toolStatus === 'running') return i
+  }
+  return -1
+}
+
 // ─── Notification sound (plays when task completes while window is hidden) ───
 const notificationAudio = new Audio(notificationSrc)
 notificationAudio.volume = 1.0
@@ -264,7 +278,7 @@ export const useSessionStore = create<State>((set, get) => ({
 
     try {
       apply(await window.clui.start())
-      get().refreshOpenclawModels()
+      void get().refreshOpenclawModels()
     } catch {}
   },
 
@@ -445,7 +459,7 @@ export const useSessionStore = create<State>((set, get) => ({
       set({ marketplaceOpen: false })
     } else {
       set({ isExpanded: false, marketplaceOpen: true, controlCenterOpen: false, skillBuilderOpen: false })
-      get().loadMarketplace()
+      void get().loadMarketplace()
     }
   },
 
@@ -506,6 +520,13 @@ export const useSessionStore = create<State>((set, get) => ({
       const installedSet = new Set([...installed, ...existingClawhub].map((n) => n.toLowerCase()))
       const pluginStates: Record<string, PluginStatus> = {}
       for (const p of catalog.plugins) {
+        // Gateway entries are, by construction, things the runtime already has.
+        // Settled by id rather than by name so a same-named community skill in
+        // the browsable catalogue can never be mistaken for one of them.
+        if (p.installMode === 'gateway') {
+          pluginStates[p.id] = 'installed'
+          continue
+        }
         if (p.installMode === 'clawhub') {
           pluginStates[p.id] = installedSet.has(`clawhub:${p.installName}`.toLowerCase()) ? 'installed' : 'not_installed'
           continue
@@ -586,10 +607,10 @@ export const useSessionStore = create<State>((set, get) => ({
       }
     }
 
-    set((s) => ({
+    set({
       marketplaceOpen: false,
       isExpanded: true,
-    }))
+    })
 
     setTimeout(() => {
       get().sendMessage(prompt)
@@ -855,7 +876,7 @@ export const useSessionStore = create<State>((set, get) => ({
             }
         return {
           ...withEffectiveBase,
-          status: 'connecting' as TabStatus,
+          status: 'connecting',
           activeRequestId: requestId,
           currentActivity: 'Starting...',
           title,
@@ -956,23 +977,31 @@ export const useSessionStore = create<State>((set, get) => ({
             ]
             break
 
+          // Both of these used to mutate the message object in place and hand
+          // back a new array. Zustand saw a change, but the tool rows are
+          // React.memo'd on the message reference, so the streamed command and
+          // the completed state never repainted — and the mutation also
+          // rewrote the message inside the *previous* state snapshot.
           case 'tool_call_update': {
-            const msgs = [...updated.messages]
-            const lastTool = [...msgs].reverse().find((m) => m.role === 'tool' && m.toolStatus === 'running')
-            if (lastTool) {
-              lastTool.toolInput = (lastTool.toolInput || '') + event.partialInput
+            const idx = lastRunningToolIndex(updated.messages)
+            if (idx >= 0) {
+              const target = updated.messages[idx]
+              updated.messages = updated.messages.with(idx, {
+                ...target,
+                toolInput: (target.toolInput || '') + event.partialInput,
+              })
             }
-            updated.messages = msgs
             break
           }
 
           case 'tool_call_complete': {
-            const msgs2 = [...updated.messages]
-            const runningTool = [...msgs2].reverse().find((m) => m.role === 'tool' && m.toolStatus === 'running')
-            if (runningTool) {
-              runningTool.toolStatus = 'completed'
+            const idx = lastRunningToolIndex(updated.messages)
+            if (idx >= 0) {
+              updated.messages = updated.messages.with(idx, {
+                ...updated.messages[idx],
+                toolStatus: 'completed',
+              })
             }
-            updated.messages = msgs2
             break
           }
 
@@ -1077,7 +1106,7 @@ export const useSessionStore = create<State>((set, get) => ({
               updated.permissionDenied = null
             }
             // Completion cues when app is hidden: sound + native desktop notification
-            playNotificationIfHidden()
+            void playNotificationIfHidden()
             void showCompletionNotificationIfHidden(
               'OpenClaw UI: Prompt finished',
               latestAssistantPreview(updated.messages),
@@ -1196,7 +1225,7 @@ export const useSessionStore = create<State>((set, get) => ({
 
         return {
           ...t,
-          status: 'failed' as TabStatus,
+          status: 'failed',
           activeRequestId: null,
           currentActivity: '',
           permissionQueue: [],

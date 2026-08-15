@@ -404,7 +404,7 @@ export class PermissionServer extends EventEmitter {
    * Get permission card options for a given tool + input.
    * WebFetch gets domain-scoped options; all others get session-scoped.
    */
-  getOptionsForTool(toolName: string, toolInput?: Record<string, unknown>): PermissionOption[] {
+  getOptionsForTool(toolName: string, _toolInput?: Record<string, unknown>): PermissionOption[] {
     // Bash commands are too diverse for session-scoped blanket allow —
     // each command should be individually reviewed.
     if (toolName === 'Bash') {

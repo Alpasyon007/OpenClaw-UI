@@ -2,6 +2,7 @@ import React from 'react'
 import ReactDOM from 'react-dom/client'
 import { MotionGlobalConfig } from 'framer-motion'
 import App from './App'
+import { ErrorBoundary } from './ErrorBoundary'
 import './index.css'
 
 /**
@@ -32,6 +33,8 @@ if (window.__cluiNoAnim) {
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
-    <App />
+    <ErrorBoundary>
+      <App />
+    </ErrorBoundary>
   </React.StrictMode>
 )

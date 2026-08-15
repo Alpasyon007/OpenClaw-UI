@@ -56,6 +56,10 @@ export function PermissionCard({ tabId, permission, queueLength = 1 }: Props) {
   React.useEffect(() => {
     setResponded(false)
     setShowTerminalPrompt(permissionMode === 'ask' && permission.toolTitle === 'Bash')
+    // Keyed on the question id on purpose: this resets the card when the
+    // queue advances, and must not re-fire when the mode changes underneath a
+    // question the user is already looking at.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [permission.questionId])
 
   const handleOption = (optionId: string) => {
