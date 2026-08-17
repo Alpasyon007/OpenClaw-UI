@@ -1,0 +1,16 @@
+{
+  "name": "@openclaw/notifier",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Headless operator client that turns gateway events into push notifications",
+  "license": "MIT",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "types": "./src/index.ts",
+  "dependencies": {
+    "@openclaw/gateway-client": "*",
+    "@openclaw/protocol": "*"
+  }
+}
