@@ -1,0 +1,26 @@
+# Native projects are generated from app.json by Continuous Native Generation
+# (`expo prebuild`), so they are build output, not source. Committing them means
+# app.json and the native config drift apart silently, and it drags a
+# debug.keystore into version control.
+/android
+/ios
+
+# Expo local state — device lists, caches, generated route types.
+/.expo
+expo-env.d.ts
+
+node_modules/
+.expo-shared/
+
+# Build artefacts
+*.jks
+*.p8
+*.p12
+*.key
+*.mobileprovision
+*.orig.*
+web-build/
+dist/
+
+# macOS
+.DS_Store

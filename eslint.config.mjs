@@ -32,6 +32,12 @@ export default tseslint.config(
       // CMake's build tree, which vendors the whole of saucer and its examples.
       'shell/build/**',
       'coverage/**',
+      // The mobile app has its own TypeScript project and its own React Native
+      // lint rules. This config is type-aware and bound to the root tsconfig,
+      // which does not include `apps/` — pointing it at Metro configs and RN
+      // components produces parser errors rather than useful findings. Lint it
+      // from `apps/mobile` with eslint-config-expo instead.
+      'apps/**',
     ],
   },
 

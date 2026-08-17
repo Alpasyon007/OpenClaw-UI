@@ -27,6 +27,11 @@ export default defineConfig({
       // The renderer imports the notification sound as a URL. Vitest has no
       // asset pipeline, so point it at a stub that returns a data URI.
       '../../../resources/notification.mp3': resolve(__dirname, 'tests/stubs/audio.ts'),
+      // Workspace packages resolve to source. Vitest does not read tsconfig
+      // `paths`, so these have to be restated here or every package import
+      // fails to resolve under test while typechecking cleanly.
+      '@openclaw/protocol': resolve(__dirname, 'packages/protocol/src/index.ts'),
+      '@openclaw/gateway-client': resolve(__dirname, 'packages/gateway-client/src/index.ts'),
     },
   },
   test: {
@@ -44,12 +49,13 @@ export default defineConfig({
       provider: 'v8',
       reportsDirectory: 'reports/coverage',
       reporter: ['text-summary', 'html', 'lcov', 'json-summary'],
-      include: ['src/**/*.{ts,tsx}', 'sidecar/**/*.{ts,mjs}'],
+      include: ['src/**/*.{ts,tsx}', 'sidecar/**/*.{ts,mjs}', 'packages/*/src/**/*.ts'],
       exclude: [
         // Declarative, never executed — it exists to be parsed by gen-shim.
         'src/shared/clui-contract.ts',
         'src/renderer/env.d.ts',
         'src/renderer/main.tsx',
+        '**/*.test.ts',
         '**/*.d.ts',
       ],
       // A ratchet pinned just below the measured baseline, not a target.
@@ -75,7 +81,14 @@ export default defineConfig({
         test: {
           name: 'node',
           environment: 'node',
-          include: ['tests/{unit,contract,sidecar}/**/*.test.ts'],
+          // Package tests are colocated rather than living under tests/. These
+          // packages are meant to be portable — a package that carries its own
+          // suite can be lifted out without first untangling which of the
+          // repo's central tests belonged to it.
+          include: [
+            'tests/{unit,contract,sidecar}/**/*.test.ts',
+            'packages/*/src/**/*.test.ts',
+          ],
         },
       },
       {
