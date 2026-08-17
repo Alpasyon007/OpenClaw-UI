@@ -5,11 +5,13 @@
  * a device can be paired at a narrower scope than it asked for, and the only
  * honest answer to "what can this phone do" is what the gateway actually gave.
  */
+import { useMemo } from 'react'
 import { ScrollView, StyleSheet, Text, TextInput, View, Pressable } from 'react-native'
 import { SafeAreaView } from 'react-native-safe-area-context'
 import { Stack } from 'expo-router'
 import { useApp } from '../lib/store'
-import { colors, font, radius, space, statusColor } from '../lib/theme'
+import { useColors, font, radius, space, statusColor } from '../lib/theme'
+import type { ColorPalette } from '@openclaw/theme'
 
 export default function SettingsScreen() {
   const {
@@ -32,30 +34,32 @@ export default function SettingsScreen() {
     connect,
     disconnect,
   } = useApp()
+  const colors = useColors()
+  const styles = useMemo(() => makeStyles(colors), [colors])
 
   return (
     <SafeAreaView style={styles.safe} edges={['bottom']}>
       <Stack.Screen options={{ title: 'Settings' }} />
       <ScrollView contentContainerStyle={styles.container}>
-        <Section title="Connection">
-          <Text style={[styles.status, { color: statusColor(conn) }]}>{conn}</Text>
+        <Section styles={styles} title="Connection">
+          <Text style={[styles.status, { color: statusColor(colors, conn) }]}>{conn}</Text>
           {connMessage ? <Text style={styles.detail}>{connMessage}</Text> : null}
           {serverVersion ? <Text style={styles.detail}>gateway {serverVersion}</Text> : null}
         </Section>
 
-        <Section title="Gateway URL">
+        <Section styles={styles} title="Gateway URL">
           <TextInput
             style={styles.input}
             value={url}
             onChangeText={setUrl}
             autoCapitalize="none"
             autoCorrect={false}
-            placeholderTextColor={colors.textFaint}
+            placeholderTextColor={colors.textTertiary}
           />
           <Text style={styles.hint}>Must be wss:// unless the host is loopback.</Text>
         </Section>
 
-        <Section title="Token">
+        <Section styles={styles} title="Token">
           <TextInput
             style={styles.input}
             value={token}
@@ -64,7 +68,7 @@ export default function SettingsScreen() {
             autoCapitalize="none"
             autoCorrect={false}
             placeholder="OPENCLAW_REMOTE_TOKEN"
-            placeholderTextColor={colors.textFaint}
+            placeholderTextColor={colors.textTertiary}
           />
           <Text style={styles.hint}>Stored in the Android Keystore, never in plain storage.</Text>
         </Section>
@@ -78,8 +82,8 @@ export default function SettingsScreen() {
           </Pressable>
         </View>
 
-        <Section title="Push notifications">
-          <Text style={[styles.status, { color: pushColor(push?.status) }]}>
+        <Section styles={styles} title="Push notifications">
+          <Text style={[styles.status, { color: pushColor(colors, push?.status) }]}>
             {push?.status ?? 'not set up'}
           </Text>
           {pushDetail ? <Text style={styles.detail}>{pushDetail}</Text> : null}
@@ -90,7 +94,7 @@ export default function SettingsScreen() {
             autoCapitalize="none"
             autoCorrect={false}
             placeholder="https://notifier.example.com"
-            placeholderTextColor={colors.textFaint}
+            placeholderTextColor={colors.textTertiary}
           />
           <Text style={styles.hint}>
             Where the notifier service runs. Registration is signed with this device&apos;s key —
@@ -101,7 +105,7 @@ export default function SettingsScreen() {
           </Pressable>
         </Section>
 
-        <Section title="Device identity">
+        <Section styles={styles} title="Device identity">
           <Text style={styles.mono} selectable>
             {identity?.deviceId ?? '…'}
           </Text>
@@ -111,18 +115,18 @@ export default function SettingsScreen() {
           </Text>
         </Section>
 
-        <Section title="Granted scopes">
+        <Section styles={styles} title="Granted scopes">
           <Text style={styles.mono}>{scopes.length ? scopes.join('\n') : '(none)'}</Text>
         </Section>
 
         {agents.length > 0 ? (
-          <Section title={`Agents (${agents.length})`}>
+          <Section styles={styles} title={`Agents (${agents.length})`}>
             <Text style={styles.mono}>{agents.map((a) => a.name ?? a.id).join('\n')}</Text>
           </Section>
         ) : null}
 
         {models.length > 0 ? (
-          <Section title={`Models (${models.length})`}>
+          <Section styles={styles} title={`Models (${models.length})`}>
             <Text style={styles.mono}>
               {models
                 .slice(0, 12)
@@ -136,14 +140,14 @@ export default function SettingsScreen() {
   )
 }
 
-function pushColor(status?: string): string {
-  if (status === 'registered') return colors.ok
-  if (status === 'denied' || status === 'unavailable') return colors.error
-  if (status === 'unsupported') return colors.warn
-  return colors.textMuted
+function pushColor(colors: ColorPalette, status?: string): string {
+  if (status === 'registered') return colors.statusComplete
+  if (status === 'denied' || status === 'unavailable') return colors.statusError
+  if (status === 'unsupported') return colors.statusPermission
+  return colors.textSecondary
 }
 
-function Section({ title, children }: { title: string; children: React.ReactNode }) {
+function Section({ styles, title, children }: { styles: ReturnType<typeof makeStyles>; title: string; children: React.ReactNode }) {
   return (
     <View style={styles.section}>
       <Text style={styles.sectionTitle}>{title}</Text>
@@ -152,27 +156,28 @@ function Section({ title, children }: { title: string; children: React.ReactNode
   )
 }
 
-const styles = StyleSheet.create({
-  safe: { flex: 1, backgroundColor: colors.bg },
+const makeStyles = (colors: ColorPalette) =>
+  StyleSheet.create({
+  safe: { flex: 1, backgroundColor: colors.containerBg },
   container: { padding: space.lg },
   section: { marginBottom: space.xl },
   sectionTitle: {
-    color: colors.textMuted,
+    color: colors.textSecondary,
     fontSize: font.size.xs,
     letterSpacing: 0.5,
     marginBottom: space.sm,
     textTransform: 'uppercase',
   },
   status: { fontSize: font.size.lg, fontWeight: '700' },
-  detail: { color: colors.textMuted, fontSize: font.size.sm, marginTop: space.xs },
-  hint: { color: colors.textFaint, fontSize: font.size.xs, marginTop: space.xs },
-  mono: { color: colors.text, fontFamily: font.mono, fontSize: font.size.sm },
+  detail: { color: colors.textSecondary, fontSize: font.size.sm, marginTop: space.xs },
+  hint: { color: colors.textTertiary, fontSize: font.size.xs, marginTop: space.xs },
+  mono: { color: colors.textPrimary, fontFamily: font.mono, fontSize: font.size.sm },
   input: {
-    backgroundColor: colors.surface,
-    color: colors.text,
+    backgroundColor: colors.surfacePrimary,
+    color: colors.textPrimary,
     borderRadius: radius.md,
     borderWidth: 1,
-    borderColor: colors.border,
+    borderColor: colors.containerBorder,
     paddingHorizontal: space.md,
     paddingVertical: space.sm,
     fontSize: font.size.sm,
@@ -185,15 +190,15 @@ const styles = StyleSheet.create({
     paddingVertical: 14,
     alignItems: 'center',
   },
-  primaryText: { color: colors.accentText, fontWeight: '700' },
+  primaryText: { color: colors.textOnAccent, fontWeight: '700' },
   secondary: {
     flex: 1,
-    backgroundColor: colors.surface,
+    backgroundColor: colors.surfacePrimary,
     borderRadius: radius.md,
     paddingVertical: 14,
     alignItems: 'center',
     borderWidth: 1,
-    borderColor: colors.border,
+    borderColor: colors.containerBorder,
   },
-  secondaryText: { color: colors.textMuted, fontWeight: '600' },
-})
+  secondaryText: { color: colors.textSecondary, fontWeight: '600' },
+  })

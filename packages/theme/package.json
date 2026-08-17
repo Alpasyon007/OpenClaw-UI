@@ -1,0 +1,12 @@
+{
+  "name": "@openclaw/theme",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Seed-derived colour palette shared by the desktop renderer and the phone app",
+  "license": "MIT",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "types": "./src/index.ts"
+}

@@ -12,13 +12,17 @@
  * component re-renders on every delta, and the transcript can be hundreds of
  * rows long.
  */
-import { memo } from 'react'
+import { memo, useMemo } from 'react'
 import { StyleSheet, Text, View } from 'react-native'
 import Markdown from 'react-native-markdown-display'
 import type { TranscriptMessage } from '@openclaw/conversation'
-import { colors, font, radius, space } from '../lib/theme'
+import { useColors, font, radius, space } from '../lib/theme'
+import type { ColorPalette } from '@openclaw/theme'
 
 function MessageBubbleImpl({ message }: { message: TranscriptMessage }) {
+  const colors = useColors()
+  const styles = useMemo(() => makeStyles(colors), [colors])
+  const markdownStyles = useMemo(() => makeMarkdownStyles(colors), [colors])
   const isUser = message.role === 'user'
   const failed = message.status === 'error'
 
@@ -56,7 +60,8 @@ export const MessageBubble = memo(
     a.message.pending === b.message.pending,
 )
 
-const styles = StyleSheet.create({
+const makeStyles = (colors: ColorPalette) =>
+  StyleSheet.create({
   wrap: { maxWidth: '92%' },
   left: { alignSelf: 'flex-start' },
   right: { alignSelf: 'flex-end' },
@@ -65,15 +70,15 @@ const styles = StyleSheet.create({
     paddingHorizontal: space.md,
     paddingVertical: space.sm,
     borderWidth: 1,
-    borderColor: colors.border,
+    borderColor: colors.containerBorder,
   },
   userBubble: { backgroundColor: colors.userBubble },
-  assistantBubble: { backgroundColor: colors.assistantBubble },
-  errorBubble: { borderColor: colors.error },
+  assistantBubble: { backgroundColor: colors.surfacePrimary },
+  errorBubble: { borderColor: colors.statusError },
   pending: { opacity: 0.6 },
-  userText: { color: colors.text, fontSize: font.size.md, lineHeight: 21 },
+  userText: { color: colors.textPrimary, fontSize: font.size.md, lineHeight: 21 },
   caret: { color: colors.accent, fontSize: font.size.md },
-  errorNote: { color: colors.error, fontSize: font.size.xs, marginTop: 2, textAlign: 'right' },
+  errorNote: { color: colors.statusError, fontSize: font.size.xs, marginTop: 2, textAlign: 'right' },
 })
 
 /**
@@ -82,53 +87,53 @@ const styles = StyleSheet.create({
  * Tables and fenced code get horizontal scroll rather than wrapping: a wrapped
  * table on a phone is unreadable, and wrapped code changes what the code says.
  */
-const markdownStyles = {
-  body: { color: colors.text, fontSize: font.size.md, lineHeight: 21 },
-  heading1: { color: colors.text, fontSize: font.size.xl, fontWeight: '700', marginTop: space.sm },
-  heading2: { color: colors.text, fontSize: font.size.lg, fontWeight: '700', marginTop: space.sm },
-  heading3: { color: colors.text, fontSize: font.size.md, fontWeight: '700', marginTop: space.sm },
-  strong: { fontWeight: '700', color: colors.text },
+const makeMarkdownStyles = (colors: ColorPalette) => ({
+  body: { color: colors.textPrimary, fontSize: font.size.md, lineHeight: 21 },
+  heading1: { color: colors.textPrimary, fontSize: font.size.xl, fontWeight: '700', marginTop: space.sm },
+  heading2: { color: colors.textPrimary, fontSize: font.size.lg, fontWeight: '700', marginTop: space.sm },
+  heading3: { color: colors.textPrimary, fontSize: font.size.md, fontWeight: '700', marginTop: space.sm },
+  strong: { fontWeight: '700', color: colors.textPrimary },
   em: { fontStyle: 'italic' },
   link: { color: colors.accent },
   blockquote: {
-    backgroundColor: colors.surfaceRaised,
+    backgroundColor: colors.surfaceSecondary,
     borderLeftWidth: 3,
     borderLeftColor: colors.accent,
     paddingHorizontal: space.md,
     paddingVertical: space.xs,
   },
   code_inline: {
-    backgroundColor: colors.bg,
-    color: colors.info,
+    backgroundColor: colors.containerBg,
+    color: colors.statusRunning,
     fontFamily: font.mono,
     fontSize: font.size.sm,
   },
   code_block: {
-    backgroundColor: colors.bg,
-    color: colors.text,
+    backgroundColor: colors.containerBg,
+    color: colors.textPrimary,
     fontFamily: font.mono,
     fontSize: font.size.sm,
     borderRadius: radius.sm,
     borderWidth: 1,
-    borderColor: colors.border,
+    borderColor: colors.containerBorder,
     padding: space.sm,
   },
   fence: {
-    backgroundColor: colors.bg,
-    color: colors.text,
+    backgroundColor: colors.containerBg,
+    color: colors.textPrimary,
     fontFamily: font.mono,
     fontSize: font.size.sm,
     borderRadius: radius.sm,
     borderWidth: 1,
-    borderColor: colors.border,
+    borderColor: colors.containerBorder,
     padding: space.sm,
   },
-  table: { borderColor: colors.border, borderWidth: 1, borderRadius: radius.sm },
-  thead: { backgroundColor: colors.surfaceRaised },
-  th: { padding: space.xs, color: colors.text, fontWeight: '700' },
-  td: { padding: space.xs, color: colors.textMuted },
-  tr: { borderColor: colors.border },
-  hr: { backgroundColor: colors.border, height: 1 },
+  table: { borderColor: colors.containerBorder, borderWidth: 1, borderRadius: radius.sm },
+  thead: { backgroundColor: colors.surfaceSecondary },
+  th: { padding: space.xs, color: colors.textPrimary, fontWeight: '700' },
+  td: { padding: space.xs, color: colors.textSecondary },
+  tr: { borderColor: colors.containerBorder },
+  hr: { backgroundColor: colors.containerBorder, height: 1 },
   bullet_list: { marginVertical: space.xs },
   ordered_list: { marginVertical: space.xs },
-} as const
+}) as const

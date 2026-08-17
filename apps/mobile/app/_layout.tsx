@@ -6,16 +6,23 @@ import 'react-native-get-random-values'
 
 import { Stack } from 'expo-router'
 import { StatusBar } from 'expo-status-bar'
+import { useColors, useIsDark } from '../lib/theme'
 
 export default function RootLayout() {
+  // The header is part of the theme, not chrome around it. Hardcoding it left a
+  // dark bar sitting above a light body whenever the system scheme was light.
+  const colors = useColors()
+  const isDark = useIsDark()
+
   return (
     <>
-      <StatusBar style="light" />
+      <StatusBar style={isDark ? 'light' : 'dark'} />
       <Stack
         screenOptions={{
-          headerStyle: { backgroundColor: '#12121a' },
-          headerTintColor: '#e6e6f0',
-          contentStyle: { backgroundColor: '#0b0b10' },
+          headerStyle: { backgroundColor: colors.containerBgCollapsed },
+          headerTintColor: colors.textPrimary,
+          headerTitleStyle: { color: colors.textPrimary },
+          contentStyle: { backgroundColor: colors.containerBg },
         }}
       >
         <Stack.Screen name="index" options={{ title: 'OpenClaw' }} />

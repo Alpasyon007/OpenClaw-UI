@@ -12,9 +12,11 @@
  *    `allow-always` when policy forbids durable trust promises something the
  *    gateway will refuse.
  */
+import { useMemo } from 'react'
 import { Modal, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native'
 import { availableDecisions, type ApprovalDecision, type ExecApprovalRequested } from '@openclaw/protocol'
-import { colors, font, radius, space } from '../lib/theme'
+import { useColors, font, radius, space } from '../lib/theme'
+import type { ColorPalette } from '@openclaw/theme'
 
 const SENSITIVE = /token|password|secret|key|auth|credential|api.?key/i
 
@@ -39,6 +41,8 @@ export function ApprovalSheet({
   approval: ExecApprovalRequested | null
   onResolve: (id: string, decision: ApprovalDecision) => void
 }) {
+  const colors = useColors()
+  const styles = useMemo(() => makeStyles(colors), [colors])
   if (!approval) return null
 
   const req = approval.request
@@ -68,9 +72,9 @@ export function ApprovalSheet({
           </ScrollView>
 
           <View style={styles.meta}>
-            {req.cwd ? <MetaRow label="cwd" value={req.cwd} /> : null}
-            {req.security ? <MetaRow label="security" value={req.security} /> : null}
-            {req.sessionKey ? <MetaRow label="session" value={req.sessionKey} /> : null}
+            {req.cwd ? <MetaRow styles={styles} label="cwd" value={req.cwd} /> : null}
+            {req.security ? <MetaRow styles={styles} label="security" value={req.security} /> : null}
+            {req.sessionKey ? <MetaRow styles={styles} label="session" value={req.sessionKey} /> : null}
           </View>
 
           <View style={styles.actions}>
@@ -92,7 +96,7 @@ export function ApprovalSheet({
   )
 }
 
-function MetaRow({ label, value }: { label: string; value: string }) {
+function MetaRow({ styles, label, value }: { styles: ReturnType<typeof makeStyles>; label: string; value: string }) {
   const shown = SENSITIVE.test(label) ? '••••••••' : value
   return (
     <View style={styles.metaRow}>
@@ -104,46 +108,47 @@ function MetaRow({ label, value }: { label: string; value: string }) {
   )
 }
 
-const styles = StyleSheet.create({
+const makeStyles = (colors: ColorPalette) =>
+  StyleSheet.create({
   backdrop: { flex: 1, backgroundColor: '#000000cc', justifyContent: 'flex-end' },
   sheet: {
-    backgroundColor: colors.surface,
+    backgroundColor: colors.surfacePrimary,
     borderTopLeftRadius: radius.lg,
     borderTopRightRadius: radius.lg,
     padding: space.lg,
     borderTopWidth: 1,
-    borderColor: colors.borderStrong,
+    borderColor: colors.tabActiveBorder,
     maxHeight: '85%',
   },
-  title: { color: colors.text, fontSize: font.size.xl, fontWeight: '700' },
-  subtitle: { color: colors.textMuted, fontSize: font.size.sm, marginTop: space.xs },
+  title: { color: colors.textPrimary, fontSize: font.size.xl, fontWeight: '700' },
+  subtitle: { color: colors.textSecondary, fontSize: font.size.sm, marginTop: space.xs },
   warning: {
     backgroundColor: '#3a2a0a',
     borderRadius: radius.sm,
     padding: space.md,
     marginTop: space.md,
     borderWidth: 1,
-    borderColor: colors.warn,
+    borderColor: colors.statusPermission,
   },
-  warningText: { color: colors.warn, fontSize: font.size.sm },
+  warningText: { color: colors.statusPermission, fontSize: font.size.sm },
   commandBox: {
-    backgroundColor: colors.bg,
+    backgroundColor: colors.containerBg,
     borderRadius: radius.sm,
     borderWidth: 1,
-    borderColor: colors.border,
+    borderColor: colors.containerBorder,
     marginTop: space.md,
     maxHeight: 200,
   },
-  command: { color: colors.text, fontFamily: font.mono, fontSize: font.size.sm },
+  command: { color: colors.textPrimary, fontFamily: font.mono, fontSize: font.size.sm },
   meta: { marginTop: space.md, gap: space.xs },
   metaRow: { flexDirection: 'row', gap: space.sm },
-  metaLabel: { color: colors.textFaint, fontSize: font.size.xs, width: 64 },
-  metaValue: { color: colors.textMuted, fontSize: font.size.xs, flex: 1, fontFamily: font.mono },
+  metaLabel: { color: colors.textTertiary, fontSize: font.size.xs, width: 64 },
+  metaValue: { color: colors.textSecondary, fontSize: font.size.xs, flex: 1, fontFamily: font.mono },
   actions: { flexDirection: 'row', gap: space.sm, marginTop: space.lg },
   button: { flex: 1, paddingVertical: 14, borderRadius: radius.sm, alignItems: 'center' },
   allow: { backgroundColor: colors.accent },
-  deny: { backgroundColor: colors.surfaceRaised, borderWidth: 1, borderColor: colors.error },
+  deny: { backgroundColor: colors.surfaceSecondary, borderWidth: 1, borderColor: colors.statusError },
   buttonText: { fontWeight: '700', fontSize: font.size.md },
-  allowText: { color: colors.accentText },
-  denyText: { color: colors.error },
-})
+  allowText: { color: colors.textOnAccent },
+  denyText: { color: colors.statusError },
+  })

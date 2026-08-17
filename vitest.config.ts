@@ -34,6 +34,7 @@ export default defineConfig({
       '@openclaw/gateway-client': resolve(__dirname, 'packages/gateway-client/src/index.ts'),
       '@openclaw/conversation': resolve(__dirname, 'packages/conversation/src/index.ts'),
       '@openclaw/notifier': resolve(__dirname, 'packages/notifier/src/index.ts'),
+      '@openclaw/theme': resolve(__dirname, 'packages/theme/src/index.ts'),
     },
   },
   test: {

@@ -6,17 +6,20 @@
  * reading, and a row with no key is dropped rather than rendered, because an
  * id-less row once unmounted the whole React tree.
  */
-import { useCallback, useEffect } from 'react'
+import { useCallback, useEffect, useMemo } from 'react'
 import { ActivityIndicator, FlatList, Pressable, RefreshControl, StyleSheet, Text, View } from 'react-native'
 import { SafeAreaView } from 'react-native-safe-area-context'
 import { Link, Stack, useRouter } from 'expo-router'
 import { gatewaySessionLabel } from '@openclaw/protocol'
 import { useApp, type SessionRow } from '../lib/store'
 import { ApprovalSheet } from '../components/ApprovalSheet'
-import { colors, font, radius, space, statusColor } from '../lib/theme'
+import { useColors, font, radius, space, statusColor } from '../lib/theme'
+import type { ColorPalette } from '@openclaw/theme'
 
 export default function SessionsScreen() {
   const router = useRouter()
+  const colors = useColors()
+  const styles = useMemo(() => makeStyles(colors), [colors])
   const {
     conn,
     connMessage,
@@ -50,7 +53,7 @@ export default function SessionsScreen() {
           <Text style={styles.rowTitle} numberOfLines={1}>
             {gatewaySessionLabel(item.key, item.displayName ?? undefined)}
           </Text>
-          {item.hasActiveRun ? <View style={[styles.dot, { backgroundColor: colors.info }]} /> : null}
+          {item.hasActiveRun ? <View style={[styles.dot, { backgroundColor: colors.statusRunning }]} /> : null}
           {item.unread ? <View style={[styles.dot, { backgroundColor: colors.accent }]} /> : null}
         </View>
         <Text style={styles.rowKey} numberOfLines={1}>
@@ -88,7 +91,7 @@ export default function SessionsScreen() {
           <RefreshControl
             refreshing={sessionsLoading}
             onRefresh={() => void refreshSessions()}
-            tintColor={colors.textMuted}
+            tintColor={colors.textSecondary}
           />
         }
         ListEmptyComponent={
@@ -115,13 +118,15 @@ function ConnectionBanner({
   message: string
   onRetry: () => void
 }) {
+  const colors = useColors()
+  const styles = useMemo(() => makeStyles(colors), [colors])
   if (conn === 'ready') return null
 
   return (
     <View style={styles.banner}>
       <View style={styles.bannerRow}>
-        {conn === 'connecting' ? <ActivityIndicator size="small" color={colors.info} /> : null}
-        <Text style={[styles.bannerText, { color: statusColor(conn) }]}>
+        {conn === 'connecting' ? <ActivityIndicator size="small" color={colors.statusRunning} /> : null}
+        <Text style={[styles.bannerText, { color: statusColor(colors, conn) }]}>
           {conn === 'connecting'
             ? 'Connecting…'
             : conn === 'pairing'
@@ -145,31 +150,32 @@ function ConnectionBanner({
   )
 }
 
-const styles = StyleSheet.create({
-  safe: { flex: 1, backgroundColor: colors.bg },
+const makeStyles = (colors: ColorPalette) =>
+  StyleSheet.create({
+  safe: { flex: 1, backgroundColor: colors.containerBg },
   list: { padding: space.md, gap: space.sm },
   row: {
-    backgroundColor: colors.surface,
+    backgroundColor: colors.surfacePrimary,
     borderRadius: radius.md,
     padding: space.md,
     borderWidth: 1,
-    borderColor: colors.border,
+    borderColor: colors.containerBorder,
   },
   rowHeader: { flexDirection: 'row', alignItems: 'center', gap: space.sm },
-  rowTitle: { color: colors.text, fontSize: font.size.md, fontWeight: '600', flexShrink: 1 },
-  rowKey: { color: colors.textFaint, fontSize: font.size.xs, fontFamily: font.mono, marginTop: 2 },
-  rowMeta: { color: colors.textMuted, fontSize: font.size.xs, marginTop: space.xs },
+  rowTitle: { color: colors.textPrimary, fontSize: font.size.md, fontWeight: '600', flexShrink: 1 },
+  rowKey: { color: colors.textTertiary, fontSize: font.size.xs, fontFamily: font.mono, marginTop: 2 },
+  rowMeta: { color: colors.textSecondary, fontSize: font.size.xs, marginTop: space.xs },
   dot: { width: 8, height: 8, borderRadius: radius.pill },
-  empty: { color: colors.textMuted, textAlign: 'center', marginTop: space.xl },
+  empty: { color: colors.textSecondary, textAlign: 'center', marginTop: space.xl },
   banner: {
-    backgroundColor: colors.surface,
+    backgroundColor: colors.surfacePrimary,
     borderBottomWidth: 1,
-    borderColor: colors.border,
+    borderColor: colors.containerBorder,
     padding: space.md,
   },
   headerLink: { color: colors.accent, fontSize: font.size.sm, marginRight: space.md },
   bannerRow: { flexDirection: 'row', alignItems: 'center', gap: space.sm },
   bannerText: { fontSize: font.size.md, fontWeight: '600' },
   bannerLink: { color: colors.accent, fontSize: font.size.sm, marginLeft: space.md },
-  bannerDetail: { color: colors.textMuted, fontSize: font.size.xs, marginTop: space.xs },
-})
+  bannerDetail: { color: colors.textSecondary, fontSize: font.size.xs, marginTop: space.xs },
+  })

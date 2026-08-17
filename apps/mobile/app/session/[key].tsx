@@ -25,7 +25,8 @@ import { gatewaySessionLabel } from '@openclaw/protocol'
 import { useApp } from '../../lib/store'
 import { ApprovalSheet } from '../../components/ApprovalSheet'
 import { MessageBubble } from '../../components/MessageBubble'
-import { colors, font, radius, space } from '../../lib/theme'
+import { useColors, font, radius, space } from '../../lib/theme'
+import type { ColorPalette } from '@openclaw/theme'
 
 export default function ConversationScreen() {
   const params = useLocalSearchParams<{ key: string }>()
@@ -41,6 +42,8 @@ export default function ConversationScreen() {
   const resolveApproval = useApp((s) => s.resolveApproval)
 
   const [draft, setDraft] = useState('')
+  const colors = useColors()
+  const styles = useMemo(() => makeStyles(colors), [colors])
   const inputRef = useRef<TextInput>(null)
 
   useEffect(() => {
@@ -76,7 +79,7 @@ export default function ConversationScreen() {
       >
         {loading && messages.length === 0 ? (
           <View style={styles.center}>
-            <ActivityIndicator color={colors.textMuted} />
+            <ActivityIndicator color={colors.textSecondary} />
           </View>
         ) : (
           <FlatList
@@ -92,7 +95,7 @@ export default function ConversationScreen() {
 
         {isRunning ? (
           <Pressable style={styles.stopBar} onPress={() => void abort(sessionKey)}>
-            <ActivityIndicator size="small" color={colors.info} />
+            <ActivityIndicator size="small" color={colors.statusRunning} />
             <Text style={styles.stopText}>Running — tap to stop</Text>
           </Pressable>
         ) : null}
@@ -104,7 +107,7 @@ export default function ConversationScreen() {
             value={draft}
             onChangeText={setDraft}
             placeholder={conn === 'ready' ? 'Message the agent…' : 'Not connected'}
-            placeholderTextColor={colors.textFaint}
+            placeholderTextColor={colors.textTertiary}
             editable={conn === 'ready'}
             multiline
           />
@@ -126,8 +129,9 @@ export default function ConversationScreen() {
   )
 }
 
-const styles = StyleSheet.create({
-  safe: { flex: 1, backgroundColor: colors.bg },
+const makeStyles = (colors: ColorPalette) =>
+  StyleSheet.create({
+  safe: { flex: 1, backgroundColor: colors.containerBg },
   flex: { flex: 1 },
   center: { flex: 1, alignItems: 'center', justifyContent: 'center' },
   list: { padding: space.md, gap: space.sm },
@@ -136,7 +140,7 @@ const styles = StyleSheet.create({
   // mirrored. Counter-rotating is the fix; a scaleY flip corrects only one axis
   // and leaves the text reversed.
   empty: {
-    color: colors.textMuted,
+    color: colors.textSecondary,
     textAlign: 'center',
     marginTop: space.xl,
     transform: [{ rotate: '180deg' }],
@@ -144,41 +148,41 @@ const styles = StyleSheet.create({
   bubbleWrap: { maxWidth: '88%' },
   left: { alignSelf: 'flex-start' },
   right: { alignSelf: 'flex-end' },
-  bubble: { borderRadius: radius.md, padding: space.md, borderWidth: 1, borderColor: colors.border },
+  bubble: { borderRadius: radius.md, padding: space.md, borderWidth: 1, borderColor: colors.containerBorder },
   userBubble: { backgroundColor: colors.userBubble },
-  assistantBubble: { backgroundColor: colors.assistantBubble },
-  errorBubble: { borderColor: colors.error },
+  assistantBubble: { backgroundColor: colors.surfacePrimary },
+  errorBubble: { borderColor: colors.statusError },
   pendingBubble: { opacity: 0.6 },
-  bubbleText: { color: colors.text, fontSize: font.size.md, lineHeight: 20 },
+  bubbleText: { color: colors.textPrimary, fontSize: font.size.md, lineHeight: 20 },
   caret: { color: colors.accent, fontSize: font.size.md },
-  errorNote: { color: colors.error, fontSize: font.size.xs, marginTop: 2, textAlign: 'right' },
+  errorNote: { color: colors.statusError, fontSize: font.size.xs, marginTop: 2, textAlign: 'right' },
   stopBar: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
     gap: space.sm,
     paddingVertical: space.sm,
-    backgroundColor: colors.surface,
+    backgroundColor: colors.surfacePrimary,
     borderTopWidth: 1,
-    borderColor: colors.border,
+    borderColor: colors.containerBorder,
   },
-  stopText: { color: colors.info, fontSize: font.size.sm },
+  stopText: { color: colors.statusRunning, fontSize: font.size.sm },
   composer: {
     flexDirection: 'row',
     alignItems: 'flex-end',
     gap: space.sm,
     padding: space.md,
     borderTopWidth: 1,
-    borderColor: colors.border,
-    backgroundColor: colors.surface,
+    borderColor: colors.containerBorder,
+    backgroundColor: colors.surfacePrimary,
   },
   input: {
     flex: 1,
-    backgroundColor: colors.bg,
-    color: colors.text,
+    backgroundColor: colors.containerBg,
+    color: colors.textPrimary,
     borderRadius: radius.md,
     borderWidth: 1,
-    borderColor: colors.border,
+    borderColor: colors.containerBorder,
     paddingHorizontal: space.md,
     paddingVertical: space.sm,
     fontSize: font.size.md,
@@ -191,5 +195,5 @@ const styles = StyleSheet.create({
     paddingVertical: 12,
   },
   sendDisabled: { opacity: 0.4 },
-  sendText: { color: colors.accentText, fontWeight: '700' },
-})
+  sendText: { color: colors.textOnAccent, fontWeight: '700' },
+  })
