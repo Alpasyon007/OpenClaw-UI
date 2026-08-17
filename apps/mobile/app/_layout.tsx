@@ -18,7 +18,9 @@ export default function RootLayout() {
           contentStyle: { backgroundColor: '#0b0b10' },
         }}
       >
-        <Stack.Screen name="index" options={{ title: 'OpenClaw Companion' }} />
+        <Stack.Screen name="index" options={{ title: 'OpenClaw' }} />
+        <Stack.Screen name="session/[key]" options={{ title: 'Session' }} />
+        <Stack.Screen name="settings" options={{ title: 'Settings' }} />
       </Stack>
     </>
   )

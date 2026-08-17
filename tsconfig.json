@@ -19,7 +19,8 @@
     // in sync and no stale `dist/` to accidentally ship.
     "paths": {
       "@openclaw/protocol": ["./packages/protocol/src/index.ts"],
-      "@openclaw/gateway-client": ["./packages/gateway-client/src/index.ts"]
+      "@openclaw/gateway-client": ["./packages/gateway-client/src/index.ts"],
+      "@openclaw/conversation": ["./packages/conversation/src/index.ts"]
     }
   },
   "include": [

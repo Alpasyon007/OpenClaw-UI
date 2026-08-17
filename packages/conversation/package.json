@@ -1,0 +1,15 @@
+{
+  "name": "@openclaw/conversation",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Pure transcript state: folds gateway chat events and history pages into a renderable message list",
+  "license": "MIT",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "types": "./src/index.ts",
+  "dependencies": {
+    "@openclaw/protocol": "*"
+  }
+}

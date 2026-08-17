@@ -32,6 +32,7 @@ export default defineConfig({
       // fails to resolve under test while typechecking cleanly.
       '@openclaw/protocol': resolve(__dirname, 'packages/protocol/src/index.ts'),
       '@openclaw/gateway-client': resolve(__dirname, 'packages/gateway-client/src/index.ts'),
+      '@openclaw/conversation': resolve(__dirname, 'packages/conversation/src/index.ts'),
     },
   },
   test: {
