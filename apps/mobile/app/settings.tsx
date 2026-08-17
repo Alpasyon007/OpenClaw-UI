@@ -10,7 +10,17 @@ import { ScrollView, StyleSheet, Text, TextInput, View, Pressable } from 'react-
 import { SafeAreaView } from 'react-native-safe-area-context'
 import { Stack } from 'expo-router'
 import { useApp } from '../lib/store'
-import { useColors, font, radius, space, statusColor } from '../lib/theme'
+import {
+  useColors,
+  useThemeStore,
+  useIsDark,
+  availableThemes,
+  font,
+  radius,
+  space,
+  statusColor,
+  type ThemeMode,
+} from '../lib/theme'
 import type { ColorPalette } from '@openclaw/theme'
 
 export default function SettingsScreen() {
@@ -35,6 +45,12 @@ export default function SettingsScreen() {
     disconnect,
   } = useApp()
   const colors = useColors()
+  const mode = useThemeStore((s) => s.mode)
+  const setMode = useThemeStore((s) => s.setMode)
+  const themeId = useThemeStore((s) => s.themeId)
+  const setThemeId = useThemeStore((s) => s.setThemeId)
+  const isDark = useIsDark()
+  const themes = useMemo(() => availableThemes(), [])
   const styles = useMemo(() => makeStyles(colors), [colors])
 
   return (
@@ -103,6 +119,57 @@ export default function SettingsScreen() {
           <Pressable style={[styles.secondary, { marginTop: space.sm }]} onPress={() => void enablePush()}>
             <Text style={styles.secondaryText}>Enable push</Text>
           </Pressable>
+        </Section>
+
+        <Section styles={styles} title="Appearance">
+          <Text style={styles.hint}>Mode</Text>
+          <View style={styles.segment}>
+            {(['system', 'light', 'dark'] as ThemeMode[]).map((m) => (
+              <Pressable
+                key={m}
+                style={[styles.segmentItem, mode === m && styles.segmentItemActive]}
+                onPress={() => setMode(m)}
+              >
+                <Text style={[styles.segmentText, mode === m && styles.segmentTextActive]}>
+                  {m}
+                </Text>
+              </Pressable>
+            ))}
+          </View>
+          <Text style={styles.hint}>
+            System follows the device. The palette is derived from the same seeds the desktop
+            uses, so both surfaces render identical colour.
+          </Text>
+
+          {themes.length > 1 ? (
+            <>
+              <Text style={[styles.hint, { marginTop: space.md }]}>Theme</Text>
+              <View style={styles.themeList}>
+                {themes.map((t) => (
+                  <Pressable
+                    key={t.id}
+                    style={[styles.themeChip, themeId === t.id && styles.themeChipActive]}
+                    onPress={() => setThemeId(t.id)}
+                  >
+                    {/* A swatch of the theme's own accent, so the choice is
+                        visible without applying it first. */}
+                    <View
+                      style={[
+                        styles.swatch,
+                        { backgroundColor: (isDark ? t.dark : t.light).accent },
+                      ]}
+                    />
+                    <Text
+                      style={[styles.themeName, themeId === t.id && styles.themeNameActive]}
+                      numberOfLines={1}
+                    >
+                      {t.name}
+                    </Text>
+                  </Pressable>
+                ))}
+              </View>
+            </>
+          ) : null}
         </Section>
 
         <Section styles={styles} title="Device identity">
@@ -201,4 +268,33 @@ const makeStyles = (colors: ColorPalette) =>
     borderColor: colors.containerBorder,
   },
   secondaryText: { color: colors.textSecondary, fontWeight: '600' },
+  segment: {
+    flexDirection: 'row',
+    backgroundColor: colors.surfacePrimary,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    borderColor: colors.containerBorder,
+    overflow: 'hidden',
+    marginTop: space.xs,
+  },
+  segmentItem: { flex: 1, paddingVertical: 10, alignItems: 'center' },
+  segmentItemActive: { backgroundColor: colors.accent },
+  segmentText: { color: colors.textSecondary, fontSize: font.size.sm, textTransform: 'capitalize' },
+  segmentTextActive: { color: colors.textOnAccent, fontWeight: '700' },
+  themeList: { flexDirection: 'row', flexWrap: 'wrap', gap: space.sm, marginTop: space.xs },
+  themeChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: space.sm,
+    paddingHorizontal: space.md,
+    paddingVertical: space.sm,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    borderColor: colors.containerBorder,
+    backgroundColor: colors.surfacePrimary,
+  },
+  themeChipActive: { borderColor: colors.accent, backgroundColor: colors.accentLight },
+  swatch: { width: 14, height: 14, borderRadius: radius.pill },
+  themeName: { color: colors.textSecondary, fontSize: font.size.sm },
+  themeNameActive: { color: colors.textPrimary, fontWeight: '700' },
   })
