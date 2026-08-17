@@ -9,3 +9,4 @@
 export * from './payload'
 export * from './notifier'
 export * from './fcm'
+export * from './registry'

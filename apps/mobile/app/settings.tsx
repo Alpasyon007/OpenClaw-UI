@@ -22,6 +22,11 @@ export default function SettingsScreen() {
     serverVersion,
     agents,
     models,
+    push,
+    pushDetail,
+    notifierUrl,
+    setNotifierUrl,
+    enablePush,
     setUrl,
     setToken,
     connect,
@@ -73,6 +78,29 @@ export default function SettingsScreen() {
           </Pressable>
         </View>
 
+        <Section title="Push notifications">
+          <Text style={[styles.status, { color: pushColor(push?.status) }]}>
+            {push?.status ?? 'not set up'}
+          </Text>
+          {pushDetail ? <Text style={styles.detail}>{pushDetail}</Text> : null}
+          <TextInput
+            style={[styles.input, { marginTop: space.sm }]}
+            value={notifierUrl}
+            onChangeText={setNotifierUrl}
+            autoCapitalize="none"
+            autoCorrect={false}
+            placeholder="https://notifier.example.com"
+            placeholderTextColor={colors.textFaint}
+          />
+          <Text style={styles.hint}>
+            Where the notifier service runs. Registration is signed with this device&apos;s key —
+            no extra credential leaves the phone.
+          </Text>
+          <Pressable style={[styles.secondary, { marginTop: space.sm }]} onPress={() => void enablePush()}>
+            <Text style={styles.secondaryText}>Enable push</Text>
+          </Pressable>
+        </Section>
+
         <Section title="Device identity">
           <Text style={styles.mono} selectable>
             {identity?.deviceId ?? '…'}
@@ -106,6 +134,13 @@ export default function SettingsScreen() {
       </ScrollView>
     </SafeAreaView>
   )
+}
+
+function pushColor(status?: string): string {
+  if (status === 'registered') return colors.ok
+  if (status === 'denied' || status === 'unavailable') return colors.error
+  if (status === 'unsupported') return colors.warn
+  return colors.textMuted
 }
 
 function Section({ title, children }: { title: string; children: React.ReactNode }) {

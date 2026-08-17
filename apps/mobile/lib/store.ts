@@ -34,9 +34,11 @@ import {
   type TranscriptState,
 } from '@openclaw/conversation'
 import { loadOrCreateIdentity } from './identity'
+import { acquirePushToken, registerPushToken, type PushState } from './push'
 
 const TOKEN_KEY = 'openclaw.gateway.token'
 const URL_KEY = 'openclaw.gateway.url'
+const NOTIFIER_KEY = 'openclaw.notifier.url'
 
 export const DEFAULT_URL = 'wss://openclaw-gateway-production-091e.up.railway.app'
 
@@ -73,9 +75,17 @@ interface AppState {
   agents: { id: string; name?: string }[]
   models: { id: string; label?: string }[]
 
+  /** Push registration. `null` until it has been attempted. */
+  push: PushState | null
+  pushDetail: string
+  notifierUrl: string
+
   boot: () => Promise<void>
   setUrl: (url: string) => void
   setToken: (token: string) => void
+  setNotifierUrl: (url: string) => void
+  /** Acquire an FCM token and register it with the notifier. */
+  enablePush: () => Promise<void>
   connect: () => Promise<void>
   disconnect: () => void
   refreshSessions: () => Promise<void>
@@ -112,18 +122,51 @@ export const useApp = create<AppState>((set, get) => ({
   approvals: [],
   agents: [],
   models: [],
+  push: null,
+  pushDetail: '',
+  notifierUrl: '',
 
   async boot() {
-    const [{ identity }, storedToken, storedUrl] = await Promise.all([
+    const [{ identity }, storedToken, storedUrl, storedNotifier] = await Promise.all([
       loadOrCreateIdentity(),
       SecureStore.getItemAsync(TOKEN_KEY),
       SecureStore.getItemAsync(URL_KEY),
+      SecureStore.getItemAsync(NOTIFIER_KEY),
     ])
     set({
       identity,
       token: storedToken ?? '',
       url: storedUrl ?? DEFAULT_URL,
+      notifierUrl: storedNotifier ?? '',
     })
+  },
+
+  setNotifierUrl(url) {
+    set({ notifierUrl: url })
+    void SecureStore.setItemAsync(NOTIFIER_KEY, url)
+  },
+
+  async enablePush() {
+    const { identity, notifierUrl } = get()
+    if (!identity) return
+
+    const state = await acquirePushToken()
+    set({ push: state, pushDetail: state.status === 'registered' ? '' : state.detail })
+    if (state.status !== 'registered') return
+
+    if (!notifierUrl.trim()) {
+      // The token exists but has nowhere to go. Saying so beats silently
+      // looking registered while no notification can ever arrive.
+      set({ pushDetail: 'Got a push token, but no notifier URL is configured.' })
+      return
+    }
+
+    const outcome = await registerPushToken({
+      notifierUrl,
+      identity,
+      pushToken: state.token,
+    })
+    set({ pushDetail: outcome.detail })
   },
 
   setUrl(url) {

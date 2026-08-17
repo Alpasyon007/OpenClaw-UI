@@ -9,7 +9,7 @@
 import { useCallback, useEffect } from 'react'
 import { ActivityIndicator, FlatList, Pressable, RefreshControl, StyleSheet, Text, View } from 'react-native'
 import { SafeAreaView } from 'react-native-safe-area-context'
-import { Link, useRouter } from 'expo-router'
+import { Link, Stack, useRouter } from 'expo-router'
 import { gatewaySessionLabel } from '@openclaw/protocol'
 import { useApp, type SessionRow } from '../lib/store'
 import { ApprovalSheet } from '../components/ApprovalSheet'
@@ -64,6 +64,19 @@ export default function SessionsScreen() {
 
   return (
     <SafeAreaView style={styles.safe} edges={['bottom']}>
+      {/* In the header, not the banner: the banner hides once connected, and
+          an earlier revision put the only Settings link inside it — which made
+          settings unreachable in the state users are in most of the time. */}
+      <Stack.Screen
+        options={{
+          title: 'OpenClaw',
+          headerRight: () => (
+            <Link href="/settings" style={styles.headerLink}>
+              Settings
+            </Link>
+          ),
+        }}
+      />
       <ConnectionBanner conn={conn} message={connMessage} onRetry={() => void connect()} />
 
       <FlatList
@@ -154,6 +167,7 @@ const styles = StyleSheet.create({
     borderColor: colors.border,
     padding: space.md,
   },
+  headerLink: { color: colors.accent, fontSize: font.size.sm, marginRight: space.md },
   bannerRow: { flexDirection: 'row', alignItems: 'center', gap: space.sm },
   bannerText: { fontSize: font.size.md, fontWeight: '600' },
   bannerLink: { color: colors.accent, fontSize: font.size.sm, marginLeft: space.md },
