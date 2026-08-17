@@ -35,6 +35,7 @@ export default defineConfig({
       '@openclaw/conversation': resolve(__dirname, 'packages/conversation/src/index.ts'),
       '@openclaw/notifier': resolve(__dirname, 'packages/notifier/src/index.ts'),
       '@openclaw/theme': resolve(__dirname, 'packages/theme/src/index.ts'),
+      '@openclaw/marketplace': resolve(__dirname, 'packages/marketplace/src/index.ts'),
     },
   },
   test: {

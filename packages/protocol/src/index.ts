@@ -8,10 +8,13 @@
  * keystore belongs in `@openclaw/gateway-client`, not here.
  */
 export * from './frames'
+export * from './frames-errors'
 export * from './connect'
 export * from './device-auth'
 export * from './events'
 export * from './methods'
+export * from './attachments'
+export * from './capabilities'
 export * from './session-keys'
 export * from './push-registration'
 export * from './session-events'

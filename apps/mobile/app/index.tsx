@@ -6,15 +6,28 @@
  * reading, and a row with no key is dropped rather than rendered, because an
  * id-less row once unmounted the whole React tree.
  */
-import { useCallback, useEffect, useMemo } from 'react'
-import { ActivityIndicator, FlatList, Pressable, RefreshControl, StyleSheet, Text, View } from 'react-native'
+import { useCallback, useEffect, useMemo, useState } from 'react'
+import {
+  ActivityIndicator,
+  FlatList,
+  Pressable,
+  RefreshControl,
+  ScrollView,
+  StyleSheet,
+  Text,
+  View,
+} from 'react-native'
 import { SafeAreaView } from 'react-native-safe-area-context'
 import { Link, Stack, useRouter } from 'expo-router'
 import { gatewaySessionLabel } from '@openclaw/protocol'
-import { useApp, type SessionRow } from '../lib/store'
-import { ApprovalSheet } from '../components/ApprovalSheet'
-import { useColors, font, radius, space, statusColor } from '../lib/theme'
+import { filterByFields } from '@openclaw/conversation'
 import type { ColorPalette } from '@openclaw/theme'
+import { useApp, type SessionRow } from '../lib/store'
+import { usePrefs } from '../lib/prefs'
+import { ApprovalSheet } from '../components/ApprovalSheet'
+import { SearchBar } from '../components/SearchBar'
+import { Sheet, SheetRow } from '../components/ui'
+import { useBranding, useColors, font, radius, space, statusColor } from '../lib/theme'
 
 export default function SessionsScreen() {
   const router = useRouter()
@@ -33,15 +46,41 @@ export default function SessionsScreen() {
     token,
   } = useApp()
 
+  const hydrated = usePrefs((s) => s.hydrated)
+  const onboarded = usePrefs((s) => s.onboarded)
+  const branding = useBranding()
+
+  const [query, setQuery] = useState('')
+  const [searching, setSearching] = useState(false)
+  const [menuOpen, setMenuOpen] = useState(false)
+
   useEffect(() => {
     void boot()
   }, [boot])
+
+  // First run goes to the setup flow. Gated on `hydrated` so a slow read of
+  // preferences does not flash the wizard at someone who finished it months
+  // ago — and on the token as well, so a re-install that restored a credential
+  // is not treated as a first run either.
+  useEffect(() => {
+    if (hydrated && !onboarded && !token) router.replace('/onboarding')
+  }, [hydrated, onboarded, token, router])
 
   // Connect once a credential exists. Retrying automatically on failure would
   // walk straight into the gateway's auth rate limiter.
   useEffect(() => {
     if (conn === 'idle' && token) void connect()
   }, [conn, token, connect])
+
+  const visible = useMemo(
+    () =>
+      filterByFields(
+        sessions.filter((s) => !!s.key),
+        query,
+        (s) => [s.key, s.displayName, s.model, gatewaySessionLabel(s.key, s.displayName)],
+      ),
+    [sessions, query],
+  )
 
   const renderItem = useCallback(
     ({ item }: { item: SessionRow }) => (
@@ -53,7 +92,9 @@ export default function SessionsScreen() {
           <Text style={styles.rowTitle} numberOfLines={1}>
             {gatewaySessionLabel(item.key, item.displayName ?? undefined)}
           </Text>
-          {item.hasActiveRun ? <View style={[styles.dot, { backgroundColor: colors.statusRunning }]} /> : null}
+          {item.hasActiveRun ? (
+            <View style={[styles.dot, { backgroundColor: colors.statusRunning }]} />
+          ) : null}
           {item.unread ? <View style={[styles.dot, { backgroundColor: colors.accent }]} /> : null}
         </View>
         <Text style={styles.rowKey} numberOfLines={1}>
@@ -62,7 +103,7 @@ export default function SessionsScreen() {
         {item.model ? <Text style={styles.rowMeta}>{item.model}</Text> : null}
       </Pressable>
     ),
-    [router],
+    [router, styles, colors],
   )
 
   return (
@@ -72,18 +113,42 @@ export default function SessionsScreen() {
           settings unreachable in the state users are in most of the time. */}
       <Stack.Screen
         options={{
-          title: 'OpenClaw',
+          title: branding.appName,
+          // The glyph is the theme's wordmark badge, as it is on the desktop.
+          // Rendered as a header element rather than prefixed onto the title
+          // string so a long app name still truncates on the name and not on
+          // the mark.
+          headerLeft: () => <Text style={styles.glyph}>{branding.glyph}</Text>,
           headerRight: () => (
-            <Link href="/settings" style={styles.headerLink}>
-              Settings
-            </Link>
+            <View style={styles.headerActions}>
+              <Pressable onPress={() => setSearching((v) => !v)} hitSlop={8}>
+                <Text style={styles.headerLink}>Search</Text>
+              </Pressable>
+              <Pressable onPress={() => setMenuOpen(true)} hitSlop={8}>
+                <Text style={styles.headerLink}>More</Text>
+              </Pressable>
+            </View>
           ),
         }}
       />
+
       <ConnectionBanner conn={conn} message={connMessage} onRetry={() => void connect()} />
 
+      {searching ? (
+        <SearchBar
+          value={query}
+          onChange={setQuery}
+          placeholder="Search sessions"
+          resultCount={query.trim() ? visible.length : undefined}
+          onClose={() => {
+            setSearching(false)
+            setQuery('')
+          }}
+        />
+      ) : null}
+
       <FlatList
-        data={sessions.filter((s) => !!s.key)}
+        data={visible}
         keyExtractor={(s) => s.key}
         renderItem={renderItem}
         contentContainerStyle={styles.list}
@@ -96,10 +161,54 @@ export default function SessionsScreen() {
         }
         ListEmptyComponent={
           conn === 'ready' && !sessionsLoading ? (
-            <Text style={styles.empty}>No sessions on the gateway yet.</Text>
+            <Text style={styles.empty}>
+              {query ? 'No sessions matched.' : 'No sessions on the gateway yet.'}
+            </Text>
           ) : null
         }
       />
+
+      <Sheet visible={menuOpen} onClose={() => setMenuOpen(false)} title={branding.appName}>
+        <SheetRow
+          label="Skills"
+          detail="Browse the catalogue and what your gateway has"
+          onPress={() => {
+            setMenuOpen(false)
+            router.push('/marketplace')
+          }}
+        />
+        <SheetRow
+          label="Control Center"
+          detail="Gateway health, nodes and configuration"
+          onPress={() => {
+            setMenuOpen(false)
+            router.push('/control-center')
+          }}
+        />
+        <SheetRow
+          label="Appearance"
+          detail="Themes, and the editor for writing your own"
+          onPress={() => {
+            setMenuOpen(false)
+            router.push('/appearance')
+          }}
+        />
+        <SheetRow
+          label="Settings"
+          detail="Connection, scopes, notifications"
+          onPress={() => {
+            setMenuOpen(false)
+            router.push('/settings')
+          }}
+        />
+        <SheetRow
+          label="Run setup again"
+          onPress={() => {
+            setMenuOpen(false)
+            router.push('/onboarding')
+          }}
+        />
+      </Sheet>
 
       <ApprovalSheet
         approval={approvals[0] ?? null}
@@ -125,7 +234,9 @@ function ConnectionBanner({
   return (
     <View style={styles.banner}>
       <View style={styles.bannerRow}>
-        {conn === 'connecting' ? <ActivityIndicator size="small" color={colors.statusRunning} /> : null}
+        {conn === 'connecting' ? (
+          <ActivityIndicator size="small" color={colors.statusRunning} />
+        ) : null}
         <Text style={[styles.bannerText, { color: statusColor(colors, conn) }]}>
           {conn === 'connecting'
             ? 'Connecting…'
@@ -152,30 +263,42 @@ function ConnectionBanner({
 
 const makeStyles = (colors: ColorPalette) =>
   StyleSheet.create({
-  safe: { flex: 1, backgroundColor: colors.containerBg },
-  list: { padding: space.md, gap: space.sm },
-  row: {
-    backgroundColor: colors.surfacePrimary,
-    borderRadius: radius.md,
-    padding: space.md,
-    borderWidth: 1,
-    borderColor: colors.containerBorder,
-  },
-  rowHeader: { flexDirection: 'row', alignItems: 'center', gap: space.sm },
-  rowTitle: { color: colors.textPrimary, fontSize: font.size.md, fontWeight: '600', flexShrink: 1 },
-  rowKey: { color: colors.textTertiary, fontSize: font.size.xs, fontFamily: font.mono, marginTop: 2 },
-  rowMeta: { color: colors.textSecondary, fontSize: font.size.xs, marginTop: space.xs },
-  dot: { width: 8, height: 8, borderRadius: radius.pill },
-  empty: { color: colors.textSecondary, textAlign: 'center', marginTop: space.xl },
-  banner: {
-    backgroundColor: colors.surfacePrimary,
-    borderBottomWidth: 1,
-    borderColor: colors.containerBorder,
-    padding: space.md,
-  },
-  headerLink: { color: colors.accent, fontSize: font.size.sm, marginRight: space.md },
-  bannerRow: { flexDirection: 'row', alignItems: 'center', gap: space.sm },
-  bannerText: { fontSize: font.size.md, fontWeight: '600' },
-  bannerLink: { color: colors.accent, fontSize: font.size.sm, marginLeft: space.md },
-  bannerDetail: { color: colors.textSecondary, fontSize: font.size.xs, marginTop: space.xs },
+    safe: { flex: 1, backgroundColor: colors.containerBg },
+    list: { padding: space.md, gap: space.sm },
+    row: {
+      backgroundColor: colors.surfacePrimary,
+      borderRadius: radius.md,
+      padding: space.md,
+      borderWidth: 1,
+      borderColor: colors.containerBorder,
+    },
+    rowHeader: { flexDirection: 'row', alignItems: 'center', gap: space.sm },
+    rowTitle: {
+      color: colors.textPrimary,
+      fontSize: font.size.md,
+      fontWeight: '600',
+      flexShrink: 1,
+    },
+    rowKey: {
+      color: colors.textTertiary,
+      fontSize: font.size.xs,
+      fontFamily: font.mono,
+      marginTop: 2,
+    },
+    rowMeta: { color: colors.textSecondary, fontSize: font.size.xs, marginTop: space.xs },
+    dot: { width: 8, height: 8, borderRadius: radius.pill },
+    empty: { color: colors.textSecondary, textAlign: 'center', marginTop: space.xl },
+    banner: {
+      backgroundColor: colors.surfacePrimary,
+      borderBottomWidth: 1,
+      borderColor: colors.containerBorder,
+      padding: space.md,
+    },
+    headerActions: { flexDirection: 'row', gap: space.md, marginRight: space.sm },
+    headerLink: { color: colors.accent, fontSize: font.size.sm },
+    glyph: { fontSize: font.size.lg, marginLeft: space.md, marginRight: space.xs },
+    bannerRow: { flexDirection: 'row', alignItems: 'center', gap: space.sm },
+    bannerText: { fontSize: font.size.md, fontWeight: '600' },
+    bannerLink: { color: colors.accent, fontSize: font.size.sm, marginLeft: space.md },
+    bannerDetail: { color: colors.textSecondary, fontSize: font.size.xs, marginTop: space.xs },
   })

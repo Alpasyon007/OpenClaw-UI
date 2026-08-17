@@ -5,25 +5,20 @@
  * a device can be paired at a narrower scope than it asked for, and the only
  * honest answer to "what can this phone do" is what the gateway actually gave.
  */
-import { useMemo } from 'react'
-import { ScrollView, StyleSheet, Text, TextInput, View, Pressable } from 'react-native'
+import { useCallback, useMemo, useState } from 'react'
+import { Alert, ScrollView, StyleSheet, Text, View } from 'react-native'
 import { SafeAreaView } from 'react-native-safe-area-context'
-import { Stack } from 'expo-router'
-import { useApp } from '../lib/store'
-import {
-  useColors,
-  useThemeStore,
-  useIsDark,
-  availableThemes,
-  font,
-  radius,
-  space,
-  statusColor,
-  type ThemeMode,
-} from '../lib/theme'
+import { Stack, useRouter } from 'expo-router'
+import { ADMIN_SCOPES, COMPANION_SCOPES } from '@openclaw/protocol'
 import type { ColorPalette } from '@openclaw/theme'
+import { useApp } from '../lib/store'
+import { usePrefs } from '../lib/prefs'
+import { voiceCapabilities } from '../lib/voice'
+import { useColors, font, radius, space, statusColor } from '../lib/theme'
+import { Banner, Button, Card, DetailRow, Field, Section, Toggle } from '../components/ui'
 
 export default function SettingsScreen() {
+  const router = useRouter()
   const {
     identity,
     url,
@@ -44,162 +39,191 @@ export default function SettingsScreen() {
     connect,
     disconnect,
   } = useApp()
+
+  const adminScope = usePrefs((s) => s.adminScope)
+  const setAdminScope = usePrefs((s) => s.setAdminScope)
+
   const colors = useColors()
-  const mode = useThemeStore((s) => s.mode)
-  const setMode = useThemeStore((s) => s.setMode)
-  const themeId = useThemeStore((s) => s.themeId)
-  const setThemeId = useThemeStore((s) => s.setThemeId)
-  const isDark = useIsDark()
-  const themes = useMemo(() => availableThemes(), [])
   const styles = useMemo(() => makeStyles(colors), [colors])
+  const voice = useMemo(() => voiceCapabilities(), [])
+  const [reconnecting, setReconnecting] = useState(false)
+
+  /**
+   * Changing the scope request re-pairs the device.
+   *
+   * The gateway treats a changed *signed* scope set as a `scope-upgrade`
+   * pairing request and refuses the connection until a human approves it again.
+   * A toggle that silently drops a working connection is indistinguishable from
+   * a bug, so the consequence is stated before anything changes.
+   */
+  const onToggleAdmin = useCallback(
+    (next: boolean) => {
+      Alert.alert(
+        next ? 'Request admin scope?' : 'Drop back to companion scope?',
+        next
+          ? 'This device will ask the gateway for operator.admin, which unlocks the Control Center and installing skills — and grants every other operator permission along with it.\n\nThe gateway will refuse the connection until you approve this device again with `openclaw devices approve`.'
+          : 'This device will go back to read, write and approvals only. You will need to approve it on the gateway again.',
+        [
+          { text: 'Cancel', style: 'cancel' },
+          {
+            text: next ? 'Request admin' : 'Drop admin',
+            style: next ? 'destructive' : 'default',
+            onPress: () => {
+              setAdminScope(next)
+              // Reconnect immediately. Leaving the old connection up would show
+              // the old scopes while preferences claim the new ones.
+              setReconnecting(true)
+              void connect().finally(() => setReconnecting(false))
+            },
+          },
+        ],
+      )
+    },
+    [setAdminScope, connect],
+  )
+
+  const requested = adminScope ? ADMIN_SCOPES : COMPANION_SCOPES
 
   return (
     <SafeAreaView style={styles.safe} edges={['bottom']}>
       <Stack.Screen options={{ title: 'Settings' }} />
-      <ScrollView contentContainerStyle={styles.container}>
-        <Section styles={styles} title="Connection">
+      <ScrollView contentContainerStyle={styles.container} keyboardShouldPersistTaps="handled">
+        <Section title="Connection">
           <Text style={[styles.status, { color: statusColor(colors, conn) }]}>{conn}</Text>
           {connMessage ? <Text style={styles.detail}>{connMessage}</Text> : null}
           {serverVersion ? <Text style={styles.detail}>gateway {serverVersion}</Text> : null}
         </Section>
 
-        <Section styles={styles} title="Gateway URL">
-          <TextInput
-            style={styles.input}
+        <Section title="Gateway URL" hint="Must be wss:// unless the host is loopback.">
+          <Field
             value={url}
             onChangeText={setUrl}
             autoCapitalize="none"
             autoCorrect={false}
-            placeholderTextColor={colors.textTertiary}
           />
-          <Text style={styles.hint}>Must be wss:// unless the host is loopback.</Text>
         </Section>
 
-        <Section styles={styles} title="Token">
-          <TextInput
-            style={styles.input}
+        <Section title="Token" hint="Stored in the Android Keystore, never in plain storage.">
+          <Field
             value={token}
             onChangeText={setToken}
             secureTextEntry
             autoCapitalize="none"
             autoCorrect={false}
             placeholder="OPENCLAW_REMOTE_TOKEN"
-            placeholderTextColor={colors.textTertiary}
           />
-          <Text style={styles.hint}>Stored in the Android Keystore, never in plain storage.</Text>
         </Section>
 
         <View style={styles.actions}>
-          <Pressable style={styles.primary} onPress={() => void connect()}>
-            <Text style={styles.primaryText}>{conn === 'ready' ? 'Reconnect' : 'Connect'}</Text>
-          </Pressable>
-          <Pressable style={styles.secondary} onPress={disconnect}>
-            <Text style={styles.secondaryText}>Disconnect</Text>
-          </Pressable>
+          <Button
+            label={conn === 'ready' ? 'Reconnect' : 'Connect'}
+            variant="primary"
+            busy={reconnecting}
+            onPress={() => void connect()}
+            style={styles.grow}
+          />
+          <Button label="Disconnect" onPress={disconnect} style={styles.grow} />
         </View>
 
-        <Section styles={styles} title="Push notifications">
-          <Text style={[styles.status, { color: pushColor(colors, push?.status) }]}>
-            {push?.status ?? 'not set up'}
-          </Text>
-          {pushDetail ? <Text style={styles.detail}>{pushDetail}</Text> : null}
-          <TextInput
-            style={[styles.input, { marginTop: space.sm }]}
-            value={notifierUrl}
-            onChangeText={setNotifierUrl}
-            autoCapitalize="none"
-            autoCorrect={false}
-            placeholder="https://notifier.example.com"
-            placeholderTextColor={colors.textTertiary}
+        <Section title="Permissions">
+          <Toggle
+            label="Request admin scope"
+            tone="warning"
+            value={adminScope}
+            onChange={onToggleAdmin}
+            hint="Needed for the Control Center and installing skills. Requires re-approving this device on the gateway."
           />
-          <Text style={styles.hint}>
-            Where the notifier service runs. Registration is signed with this device&apos;s key —
-            no extra credential leaves the phone.
-          </Text>
-          <Pressable style={[styles.secondary, { marginTop: space.sm }]} onPress={() => void enablePush()}>
-            <Text style={styles.secondaryText}>Enable push</Text>
-          </Pressable>
-        </Section>
-
-        <Section styles={styles} title="Appearance">
-          <Text style={styles.hint}>Mode</Text>
-          <View style={styles.segment}>
-            {(['system', 'light', 'dark'] as ThemeMode[]).map((m) => (
-              <Pressable
-                key={m}
-                style={[styles.segmentItem, mode === m && styles.segmentItemActive]}
-                onPress={() => setMode(m)}
-              >
-                <Text style={[styles.segmentText, mode === m && styles.segmentTextActive]}>
-                  {m}
-                </Text>
-              </Pressable>
-            ))}
-          </View>
-          <Text style={styles.hint}>
-            System follows the device. The palette is derived from the same seeds the desktop
-            uses, so both surfaces render identical colour.
-          </Text>
-
-          {themes.length > 1 ? (
-            <>
-              <Text style={[styles.hint, { marginTop: space.md }]}>Theme</Text>
-              <View style={styles.themeList}>
-                {themes.map((t) => (
-                  <Pressable
-                    key={t.id}
-                    style={[styles.themeChip, themeId === t.id && styles.themeChipActive]}
-                    onPress={() => setThemeId(t.id)}
-                  >
-                    {/* A swatch of the theme's own accent, so the choice is
-                        visible without applying it first. */}
-                    <View
-                      style={[
-                        styles.swatch,
-                        { backgroundColor: (isDark ? t.dark : t.light).accent },
-                      ]}
-                    />
-                    <Text
-                      style={[styles.themeName, themeId === t.id && styles.themeNameActive]}
-                      numberOfLines={1}
-                    >
-                      {t.name}
-                    </Text>
-                  </Pressable>
-                ))}
-              </View>
-            </>
+          <Card>
+            <DetailRow label="Requested" value={requested.join('\n')} mono />
+            <DetailRow label="Granted" value={scopes.join('\n') || '(none)'} mono />
+          </Card>
+          {adminScope && !scopes.includes('operator.admin') ? (
+            <Banner
+              tone="warning"
+              message="Admin was requested but not granted. Approve this device again on the gateway."
+            />
           ) : null}
         </Section>
 
-        <Section styles={styles} title="Device identity">
-          <Text style={styles.mono} selectable>
-            {identity?.deviceId ?? '…'}
-          </Text>
+        <Section title="Device identity">
+          <Card>
+            <Text style={styles.mono} selectable>
+              {identity?.deviceId ?? '…'}
+            </Text>
+          </Card>
           <Text style={styles.hint}>
             Approve this id on the gateway with `openclaw devices approve`. Revoke it with
             `openclaw devices revoke`.
           </Text>
         </Section>
 
-        <Section styles={styles} title="Granted scopes">
-          <Text style={styles.mono}>{scopes.length ? scopes.join('\n') : '(none)'}</Text>
+        <Section title="Push notifications">
+          <Text style={[styles.status, { color: pushColor(colors, push?.status) }]}>
+            {push?.status ?? 'not set up'}
+          </Text>
+          {pushDetail ? <Text style={styles.detail}>{pushDetail}</Text> : null}
+          <Field
+            value={notifierUrl}
+            onChangeText={setNotifierUrl}
+            autoCapitalize="none"
+            autoCorrect={false}
+            placeholder="https://notifier.example.com"
+            hint="Where the notifier service runs. Registration is signed with this device's key — no extra credential leaves the phone."
+          />
+          <Button label="Enable push" onPress={() => void enablePush()} />
+        </Section>
+
+        <Section title="Dictation">
+          <Card>
+            <DetailRow
+              label="Recogniser"
+              value={
+                !voice.installed
+                  ? 'not in this build'
+                  : voice.available
+                    ? 'available'
+                    : 'unavailable on this device'
+              }
+            />
+            <DetailRow
+              label="On device"
+              value={voice.onDevice ? 'yes — audio stays local' : 'no — uses network recognition'}
+            />
+          </Card>
+          <Text style={styles.hint}>
+            Where no local model is installed, the platform falls back to network recognition. The
+            microphone button says which is in use while it is listening.
+          </Text>
+        </Section>
+
+        <Section title="More">
+          <Button label="Appearance" onPress={() => router.push('/appearance')} style={styles.link} />
+          <Button label="Skills" onPress={() => router.push('/marketplace')} style={styles.link} />
+          <Button
+            label="Control Center"
+            onPress={() => router.push('/control-center')}
+            style={styles.link}
+          />
         </Section>
 
         {agents.length > 0 ? (
-          <Section styles={styles} title={`Agents (${agents.length})`}>
-            <Text style={styles.mono}>{agents.map((a) => a.name ?? a.id).join('\n')}</Text>
+          <Section title={`Agents (${agents.length})`}>
+            <Card>
+              <Text style={styles.mono}>{agents.map((a) => a.name ?? a.id).join('\n')}</Text>
+            </Card>
           </Section>
         ) : null}
 
         {models.length > 0 ? (
-          <Section styles={styles} title={`Models (${models.length})`}>
-            <Text style={styles.mono}>
-              {models
-                .slice(0, 12)
-                .map((m) => m.label ?? m.id)
-                .join('\n')}
-            </Text>
+          <Section title={`Models (${models.length})`}>
+            <Card>
+              <Text style={styles.mono}>
+                {models
+                  .slice(0, 12)
+                  .map((m) => m.label ?? m.id)
+                  .join('\n')}
+              </Text>
+            </Card>
           </Section>
         ) : null}
       </ScrollView>
@@ -214,87 +238,15 @@ function pushColor(colors: ColorPalette, status?: string): string {
   return colors.textSecondary
 }
 
-function Section({ styles, title, children }: { styles: ReturnType<typeof makeStyles>; title: string; children: React.ReactNode }) {
-  return (
-    <View style={styles.section}>
-      <Text style={styles.sectionTitle}>{title}</Text>
-      {children}
-    </View>
-  )
-}
-
 const makeStyles = (colors: ColorPalette) =>
   StyleSheet.create({
-  safe: { flex: 1, backgroundColor: colors.containerBg },
-  container: { padding: space.lg },
-  section: { marginBottom: space.xl },
-  sectionTitle: {
-    color: colors.textSecondary,
-    fontSize: font.size.xs,
-    letterSpacing: 0.5,
-    marginBottom: space.sm,
-    textTransform: 'uppercase',
-  },
-  status: { fontSize: font.size.lg, fontWeight: '700' },
-  detail: { color: colors.textSecondary, fontSize: font.size.sm, marginTop: space.xs },
-  hint: { color: colors.textTertiary, fontSize: font.size.xs, marginTop: space.xs },
-  mono: { color: colors.textPrimary, fontFamily: font.mono, fontSize: font.size.sm },
-  input: {
-    backgroundColor: colors.surfacePrimary,
-    color: colors.textPrimary,
-    borderRadius: radius.md,
-    borderWidth: 1,
-    borderColor: colors.containerBorder,
-    paddingHorizontal: space.md,
-    paddingVertical: space.sm,
-    fontSize: font.size.sm,
-  },
-  actions: { flexDirection: 'row', gap: space.sm, marginBottom: space.xl },
-  primary: {
-    flex: 1,
-    backgroundColor: colors.accent,
-    borderRadius: radius.md,
-    paddingVertical: 14,
-    alignItems: 'center',
-  },
-  primaryText: { color: colors.textOnAccent, fontWeight: '700' },
-  secondary: {
-    flex: 1,
-    backgroundColor: colors.surfacePrimary,
-    borderRadius: radius.md,
-    paddingVertical: 14,
-    alignItems: 'center',
-    borderWidth: 1,
-    borderColor: colors.containerBorder,
-  },
-  secondaryText: { color: colors.textSecondary, fontWeight: '600' },
-  segment: {
-    flexDirection: 'row',
-    backgroundColor: colors.surfacePrimary,
-    borderRadius: radius.md,
-    borderWidth: 1,
-    borderColor: colors.containerBorder,
-    overflow: 'hidden',
-    marginTop: space.xs,
-  },
-  segmentItem: { flex: 1, paddingVertical: 10, alignItems: 'center' },
-  segmentItemActive: { backgroundColor: colors.accent },
-  segmentText: { color: colors.textSecondary, fontSize: font.size.sm, textTransform: 'capitalize' },
-  segmentTextActive: { color: colors.textOnAccent, fontWeight: '700' },
-  themeList: { flexDirection: 'row', flexWrap: 'wrap', gap: space.sm, marginTop: space.xs },
-  themeChip: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: space.sm,
-    paddingHorizontal: space.md,
-    paddingVertical: space.sm,
-    borderRadius: radius.md,
-    borderWidth: 1,
-    borderColor: colors.containerBorder,
-    backgroundColor: colors.surfacePrimary,
-  },
-  themeChipActive: { borderColor: colors.accent, backgroundColor: colors.accentLight },
-  swatch: { width: 14, height: 14, borderRadius: radius.pill },
-  themeName: { color: colors.textSecondary, fontSize: font.size.sm },
-  themeNameActive: { color: colors.textPrimary, fontWeight: '700' },
+    safe: { flex: 1, backgroundColor: colors.containerBg },
+    container: { padding: space.lg },
+    grow: { flex: 1 },
+    status: { fontSize: font.size.lg, fontWeight: '700', textTransform: 'capitalize' },
+    detail: { color: colors.textSecondary, fontSize: font.size.sm, marginTop: space.xs },
+    hint: { color: colors.textTertiary, fontSize: font.size.xs, marginTop: space.xs },
+    mono: { color: colors.textPrimary, fontFamily: font.mono, fontSize: font.size.sm },
+    actions: { flexDirection: 'row', gap: space.sm, marginBottom: space.xl },
+    link: { marginBottom: space.sm, borderRadius: radius.md },
   })

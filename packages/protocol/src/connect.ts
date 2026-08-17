@@ -57,6 +57,32 @@ export const COMPANION_SCOPES: readonly Scope[] = [
   'operator.approvals',
 ]
 
+/**
+ * What a companion asks for when the user opts into the Control Center.
+ *
+ * `operator.admin` satisfies every other `operator.*` scope, so it is listed
+ * alone rather than alongside them — declaring both would be redundant on the
+ * wire and, worse, changes the signed scopes array, which re-pins the device.
+ *
+ * Switching between this and {@link COMPANION_SCOPES} is **not** a reconnect.
+ * The gateway treats a changed scope set as a `scope-upgrade` pairing request:
+ * the connection is refused with `PAIRING_REQUIRED` until a human approves the
+ * device again at the new level. A UI that offers this without saying so looks
+ * like it broke the connection.
+ */
+export const ADMIN_SCOPES: readonly Scope[] = ['operator.admin']
+
+/**
+ * The scope set for a given admin preference.
+ *
+ * Centralised so the value signed into the challenge and the value declared in
+ * `connect` params cannot drift — they must be the same array, in the same
+ * order, or the signature does not verify and the gateway grants nothing.
+ */
+export function scopesForMode(admin: boolean): readonly Scope[] {
+  return admin ? ADMIN_SCOPES : COMPANION_SCOPES
+}
+
 // ─── The challenge ───
 
 export const ConnectChallengePayloadSchema = z.object({

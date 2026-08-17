@@ -6,3 +6,6 @@
  * way to catch the ones that only misbehave on a revised response.
  */
 export * from './transcript'
+export * from './usage'
+export * from './export'
+export * from './search'

@@ -22,7 +22,8 @@
       "@openclaw/gateway-client": ["./packages/gateway-client/src/index.ts"],
       "@openclaw/conversation": ["./packages/conversation/src/index.ts"],
       "@openclaw/notifier": ["./packages/notifier/src/index.ts"],
-      "@openclaw/theme": ["./packages/theme/src/index.ts"]
+      "@openclaw/theme": ["./packages/theme/src/index.ts"],
+      "@openclaw/marketplace": ["./packages/marketplace/src/index.ts"]
     }
   },
   "include": [

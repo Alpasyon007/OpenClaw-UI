@@ -14,6 +14,8 @@
  */
 import { z } from 'zod'
 import type { Scope } from './connect'
+import { ChatAttachmentSchema } from './attachments'
+import type { GatewayRequestErrorLike } from './frames-errors'
 
 // ─── Method names ───
 
@@ -29,6 +31,16 @@ export const M = {
   NODE_LIST: 'node.list',
   HEALTH: 'health',
   STATUS: 'status',
+  COMMANDS_LIST: 'commands.list',
+  SKILLS_LIST: 'skills.list',
+
+  // admin — see ADMIN_SCOPES; a companion asks for these only on request
+  CONFIG_GET: 'config.get',
+  CONFIG_SET: 'config.set',
+  NODE_STATUS: 'node.status',
+  SKILLS_INSTALL: 'skills.install',
+  SKILLS_UNINSTALL: 'skills.uninstall',
+  SKILLS_CREATE: 'skills.create',
 
   // write
   CHAT_SEND: 'chat.send',
@@ -84,6 +96,8 @@ export const METHOD_SCOPES: Partial<Record<MethodName, Scope>> = {
   [M.SESSIONS_UNSUBSCRIBE]: 'operator.read',
   [M.SESSIONS_MESSAGES_SUBSCRIBE]: 'operator.read',
   [M.SESSIONS_MESSAGES_UNSUBSCRIBE]: 'operator.read',
+  [M.COMMANDS_LIST]: 'operator.read',
+  [M.SKILLS_LIST]: 'operator.read',
 
   [M.CHAT_SEND]: 'operator.write',
   [M.CHAT_ABORT]: 'operator.write',
@@ -104,6 +118,18 @@ export const METHOD_SCOPES: Partial<Record<MethodName, Scope>> = {
 
   [M.DEVICE_TOKEN_ROTATE]: 'operator.pairing',
   [M.DEVICE_TOKEN_REVOKE]: 'operator.pairing',
+
+  // Mutating the runtime's own configuration and inventory. `operator.admin`
+  // is the only scope that satisfies these, and a device paired at the
+  // companion default has none of them — the pre-flight check in the client is
+  // what turns that into "re-pair to request admin" rather than a bare
+  // `missing scope` from the wire.
+  [M.CONFIG_GET]: 'operator.admin',
+  [M.CONFIG_SET]: 'operator.admin',
+  [M.NODE_STATUS]: 'operator.admin',
+  [M.SKILLS_INSTALL]: 'operator.admin',
+  [M.SKILLS_UNINSTALL]: 'operator.admin',
+  [M.SKILLS_CREATE]: 'operator.admin',
 }
 
 /**
@@ -165,8 +191,18 @@ export const ChatSendParamsSchema = z.object({
   sessionId: z.string().optional(),
   thinking: z.unknown().optional(),
   fastMode: z.union([z.boolean(), z.literal('auto')]).optional(),
-  attachments: z.array(z.unknown()).optional(),
+  attachments: z.array(ChatAttachmentSchema).optional(),
   timeoutMs: z.number().int().positive().optional(),
+  /**
+   * Per-send model override.
+   *
+   * Not universally accepted: older gateway builds validate `chat.send` params
+   * strictly and answer `INVALID_REQUEST` for a field they do not know, which
+   * would make every send fail the moment a user picks a model. Send it only
+   * when the user actually chose one, and be prepared to retry without it —
+   * {@link isRejectedParamError} is the check for that path.
+   */
+  model: z.string().optional(),
 })
 
 export type ChatSendParams = z.infer<typeof ChatSendParamsSchema>
@@ -191,6 +227,152 @@ export const DeviceTokenParamsSchema = z.object({
   role: z.enum(['operator', 'node']),
   scopes: z.array(z.string()).optional(),
 })
+
+/**
+ * Did the gateway reject a *parameter* rather than fail the operation?
+ *
+ * The one place this matters is the optional `model` on `chat.send`. A gateway
+ * that does not know the field answers `INVALID_REQUEST`, and without this
+ * check the user's message is simply lost — they picked a model and sending
+ * stopped working, with nothing on screen connecting the two. Detecting it lets
+ * the caller retry once without the field and tell the user their model choice
+ * did not take, which is a far better outcome than a failed send.
+ *
+ * Kept narrow on purpose: only `INVALID_REQUEST`, and only when the message
+ * actually names a field. A broad match here would silently retry real
+ * validation failures and hide them.
+ */
+export function isRejectedParamError(error: unknown, field: string): boolean {
+  const err = error as GatewayRequestErrorLike | null
+  if (!err || typeof err !== 'object') return false
+  if (err.code !== 'INVALID_REQUEST') return false
+  const message = typeof err.message === 'string' ? err.message.toLowerCase() : ''
+  if (!message) return false
+  const name = field.toLowerCase()
+  return (
+    message.includes(name) &&
+    /\bunknown\b|\bunrecognis|\bunrecogniz|\bunexpected\b|\bnot allowed\b|\bnot permitted\b|\badditional\b/.test(
+      message,
+    )
+  )
+}
+
+// ─── Catalogue and admin params ───
+
+export const SkillsListParamsSchema = z.object({
+  /** Include skills that are present but not currently runnable. */
+  includeDisabled: z.boolean().optional(),
+})
+
+export const SkillsInstallParamsSchema = z.object({
+  /** Directory name under the runtime's managed skills dir. */
+  name: z.string().min(1).max(128),
+  /** Raw `SKILL.md`. The gateway writes it; it is never executed here. */
+  content: z.string().min(1),
+  /** Where it came from, for the runtime's own bookkeeping. */
+  source: z.string().optional(),
+  /** Replace an existing skill of the same name rather than failing. */
+  overwrite: z.boolean().optional(),
+})
+
+export const SkillsUninstallParamsSchema = z.object({
+  name: z.string().min(1).max(128),
+})
+
+/**
+ * One entry from `skills.list`.
+ *
+ * Mirrors the `openclaw skills list --json` payload the desktop already parses,
+ * so a skill reads the same on both surfaces. Everything optional: the runtime
+ * reports different subsets for bundled, extra and workspace skills.
+ */
+export const GatewaySkillSchema = z
+  .object({
+    name: z.string().optional(),
+    description: z.string().optional(),
+    emoji: z.string().optional(),
+    source: z.string().optional(),
+    disabled: z.boolean().optional(),
+    eligible: z.boolean().optional(),
+    homepage: z.string().optional(),
+    missing: z
+      .object({
+        bins: z.array(z.string()).optional(),
+        anyBins: z.array(z.string()).optional(),
+        env: z.array(z.string()).optional(),
+        config: z.array(z.string()).optional(),
+        os: z.array(z.string()).optional(),
+      })
+      .passthrough()
+      .optional(),
+  })
+  .passthrough()
+
+export type GatewaySkill = z.infer<typeof GatewaySkillSchema>
+
+export const SkillsListResultSchema = z
+  .object({
+    managedSkillsDir: z.string().optional(),
+    skills: z.array(GatewaySkillSchema).default([]),
+  })
+  .passthrough()
+
+/**
+ * One entry from `commands.list`.
+ *
+ * The gateway exposes slash commands the runtime knows about, including ones
+ * registered by plugins. A client that hardcodes its own list shows the user
+ * commands their runtime does not have and hides the ones it does.
+ */
+export const GatewayCommandSchema = z
+  .object({
+    name: z.string().optional(),
+    command: z.string().optional(),
+    description: z.string().optional(),
+    source: z.string().optional(),
+  })
+  .passthrough()
+
+export type GatewayCommand = z.infer<typeof GatewayCommandSchema>
+
+export const CommandsListResultSchema = z
+  .object({ commands: z.array(GatewayCommandSchema).default([]) })
+  .passthrough()
+
+/**
+ * A node the gateway can route work to.
+ *
+ * Loose by design — a node reports fields specific to its host, and the panel
+ * renders whatever identifying detail it finds rather than requiring a shape.
+ */
+export const GatewayNodeSchema = z
+  .object({
+    id: z.string().optional(),
+    nodeId: z.string().optional(),
+    name: z.string().optional(),
+    host: z.string().optional(),
+    platform: z.string().optional(),
+    version: z.string().optional(),
+    online: z.boolean().optional(),
+    status: z.string().optional(),
+    lastSeenAt: z.union([z.string(), z.number()]).optional(),
+  })
+  .passthrough()
+
+export type GatewayNode = z.infer<typeof GatewayNodeSchema>
+
+export const NodeListResultSchema = z
+  .object({ nodes: z.array(GatewayNodeSchema).default([]) })
+  .passthrough()
+
+/**
+ * `health` and `status` payloads.
+ *
+ * Both are rendered as key/value rows rather than parsed into a fixed shape:
+ * the gateway adds counters freely, and a schema that names them would show a
+ * shrinking subset of the truth as the server gains fields.
+ */
+export const HealthResultSchema = z.record(z.unknown())
 
 // ─── Results we depend on ───
 
