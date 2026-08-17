@@ -25,6 +25,7 @@ import { gatewaySessionLabel } from '@openclaw/protocol'
 import { useApp } from '../../lib/store'
 import { ApprovalSheet } from '../../components/ApprovalSheet'
 import { MessageBubble } from '../../components/MessageBubble'
+import { ToolCard } from '../../components/ToolCard'
 import { useColors, font, radius, space } from '../../lib/theme'
 import type { ColorPalette } from '@openclaw/theme'
 
@@ -40,6 +41,8 @@ export default function ConversationScreen() {
   const send = useApp((s) => s.send)
   const abort = useApp((s) => s.abort)
   const resolveApproval = useApp((s) => s.resolveApproval)
+  const watchSession = useApp((s) => s.watchSession)
+  const unwatchSession = useApp((s) => s.unwatchSession)
 
   const [draft, setDraft] = useState('')
   const colors = useColors()
@@ -86,7 +89,13 @@ export default function ConversationScreen() {
             inverted
             data={data}
             keyExtractor={(m) => m.id}
-            renderItem={({ item }) => <MessageBubble message={item} />}
+            renderItem={({ item }) =>
+              item.role === 'tool' ? (
+                <ToolCard message={item} colors={colors} />
+              ) : (
+                <MessageBubble message={item} />
+              )
+            }
             contentContainerStyle={styles.list}
             ListEmptyComponent={<Text style={styles.empty}>No messages yet.</Text>}
             keyboardDismissMode="interactive"

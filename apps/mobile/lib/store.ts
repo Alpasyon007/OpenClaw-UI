@@ -17,6 +17,8 @@ import {
   EVENT_CHAT,
   EVENT_EXEC_APPROVAL_REQUESTED,
   EVENT_EXEC_APPROVAL_RESOLVED,
+  EVENT_SESSION_TOOL,
+  SessionToolEventSchema,
   type ApprovalDecision,
   type ExecApprovalRequested,
 } from '@openclaw/protocol'
@@ -29,6 +31,7 @@ import {
   emptyTranscript,
   applyChatEvent,
   applyHistory,
+  applyToolEvent,
   addPendingUserMessage,
   settlePendingMessage,
   type TranscriptState,
@@ -90,6 +93,9 @@ interface AppState {
   disconnect: () => void
   refreshSessions: () => Promise<void>
   loadHistory: (sessionKey: string) => Promise<void>
+  /** Subscribe to a session so its tool activity streams in. */
+  watchSession: (sessionKey: string) => Promise<void>
+  unwatchSession: (sessionKey: string) => Promise<void>
   send: (sessionKey: string, text: string) => Promise<void>
   abort: (sessionKey: string) => Promise<void>
   resolveApproval: (id: string, decision: ApprovalDecision) => Promise<void>
@@ -323,6 +329,25 @@ export const useApp = create<AppState>((set, get) => ({
       // Leave whatever is already on screen.
     } finally {
       set((s) => ({ historyLoading: { ...s.historyLoading, [sessionKey]: false } }))
+    }
+  },
+
+  async watchSession(sessionKey) {
+    if (!client) return
+    try {
+      await client.request(M.SESSIONS_SUBSCRIBE, { key: sessionKey })
+    } catch {
+      // A gateway without the method still streams chat; tool cards are the
+      // only thing lost, so this must not surface as a failure.
+    }
+  },
+
+  async unwatchSession(sessionKey) {
+    if (!client) return
+    try {
+      await client.request(M.SESSIONS_UNSUBSCRIBE, { key: sessionKey })
+    } catch {
+      // Leaving a subscription open costs a little traffic, nothing more.
     }
   },
 

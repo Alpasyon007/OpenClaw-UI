@@ -4,6 +4,7 @@ import {
   emptyTranscript,
   applyChatEvent,
   applyHistory,
+  applyToolEvent,
   addPendingUserMessage,
   settlePendingMessage,
 } from './transcript'
@@ -191,5 +192,73 @@ describe('history', () => {
 
   it('never throws on a malformed page', () => {
     expect(() => applyHistory(emptyTranscript(), [undefined, 42, [], {}])).not.toThrow()
+  })
+})
+
+describe('tool events', () => {
+  const tool = (o: Record<string, unknown>) => o as never
+
+  it('adds a running card', () => {
+    const s = applyToolEvent(emptyTranscript(), tool({
+      toolCallId: 'c1', name: 'Bash', phase: 'start', input: { command: 'ls -la' },
+    }))
+    expect(s.messages).toHaveLength(1)
+    expect(s.messages[0]).toMatchObject({ role: 'tool', toolName: 'Bash', status: 'streaming' })
+    expect(s.messages[0].content).toBe('ls -la')
+  })
+
+  it('updates the same card rather than adding a second', () => {
+    // A tool emits a start and then a completion for the SAME call. Appending
+    // both leaves a duplicate card that never resolves.
+    let s = applyToolEvent(emptyTranscript(), tool({ toolCallId: 'c1', name: 'Bash', phase: 'start' }))
+    s = applyToolEvent(s, tool({ toolCallId: 'c1', name: 'Bash', phase: 'end', result: 'ok' }))
+    expect(s.messages).toHaveLength(1)
+    expect(s.messages[0].status).toBe('complete')
+  })
+
+  it('marks a failed tool as an error', () => {
+    const s = applyToolEvent(emptyTranscript(), tool({ toolCallId: 'c1', name: 'Bash', error: 'nope' }))
+    expect(s.messages[0].status).toBe('error')
+  })
+
+  it('places a tool BEFORE the assistant row of its run', () => {
+    // The agent runs tools while composing its reply. Appending after would
+    // show the reasoning before the work that produced it.
+    let s = applyChatEvent(emptyTranscript(), evt({ state: 'delta', deltaText: 'thinking' }))
+    s = applyToolEvent(s, tool({ toolCallId: 'c1', name: 'Read', runId: 'r1' }))
+    expect(s.messages.map((m) => m.role)).toEqual(['tool', 'assistant'])
+  })
+
+  it('appends when its run has no assistant row yet', () => {
+    const s = applyToolEvent(emptyTranscript(), tool({ toolCallId: 'c1', name: 'Read', runId: 'r9' }))
+    expect(s.messages).toHaveLength(1)
+  })
+
+  it('summarises the field that identifies the work', () => {
+    const cases: Array<[Record<string, unknown>, string]> = [
+      [{ command: 'npm test' }, 'npm test'],
+      [{ file_path: '/a/b.ts' }, '/a/b.ts'],
+      [{ pattern: 'TODO' }, 'TODO'],
+      [{ url: 'https://x.dev' }, 'https://x.dev'],
+    ]
+    for (const [input, expected] of cases) {
+      const s = applyToolEvent(emptyTranscript(), tool({ toolCallId: 'k', input }))
+      expect(s.messages[0].content).toBe(expected)
+    }
+  })
+
+  it('collapses whitespace and truncates a long summary', () => {
+    const s = applyToolEvent(emptyTranscript(), tool({
+      toolCallId: 'c1', input: { command: 'a\n\n   b' + 'x'.repeat(400) },
+    }))
+    expect(s.messages[0].content).not.toContain('\n')
+    expect(s.messages[0].content.length).toBeLessThanOrEqual(161)
+    expect(s.messages[0].content.endsWith('…')).toBe(true)
+  })
+
+  it('never throws on a malformed payload', () => {
+    for (const bad of [{}, { input: 42 }, { input: [] }, { args: null }]) {
+      expect(() => applyToolEvent(emptyTranscript(), tool(bad))).not.toThrow()
+    }
   })
 })

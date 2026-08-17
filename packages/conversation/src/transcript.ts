@@ -14,7 +14,13 @@
  *  - **Live events are delivery state; `chat.history` is the durable truth.**
  *    On reconnect the history page wins, and only an optimistic tail survives.
  */
-import type { ChatEvent } from '@openclaw/protocol'
+import {
+  toolCallKey,
+  toolName,
+  toolPhase,
+  type ChatEvent,
+  type SessionToolEvent,
+} from '@openclaw/protocol'
 
 export type MessageRole = 'user' | 'assistant' | 'tool' | 'system'
 export type MessageStatus = 'streaming' | 'complete' | 'error'
@@ -154,6 +160,89 @@ function fallbackText(event: ChatEvent): string {
     default:
       return ''
   }
+}
+
+// ─── Tool activity ───
+
+/**
+ * Fold a `session.tool` event into the transcript.
+ *
+ * Tool rows are keyed by the invocation, not appended blindly: a tool emits a
+ * start and then a completion for the same call, and treating those as two
+ * events produces a duplicate card that never resolves.
+ *
+ * A running tool appears *before* the assistant row for its run. The agent runs
+ * tools while composing its reply, so appending after would show the reasoning
+ * before the work that informed it — backwards from what happened.
+ */
+export function applyToolEvent(
+  state: TranscriptState,
+  event: SessionToolEvent,
+): TranscriptState {
+  const id = `tool:${toolCallKey(event)}`
+  const index = state.messages.findIndex((m) => m.id === id)
+  const phase = toolPhase(event)
+
+  const row: TranscriptMessage = {
+    id,
+    role: 'tool',
+    toolName: toolName(event),
+    content: summariseToolInput(event),
+    status: phase === 'running' ? 'streaming' : phase === 'error' ? 'error' : 'complete',
+    timestamp: index >= 0 ? state.messages[index].timestamp : Date.now(),
+    runId: event.runId,
+  }
+
+  if (index >= 0) {
+    const next = [...state.messages]
+    next[index] = row
+    return { ...state, messages: next }
+  }
+
+  // Insert ahead of the assistant row for this run, if one exists yet.
+  const assistantIndex = event.runId
+    ? state.messages.findIndex((m) => m.id === `run:${event.runId}`)
+    : -1
+
+  if (assistantIndex < 0) return { ...state, messages: [...state.messages, row] }
+
+  const next = [...state.messages]
+  next.splice(assistantIndex, 0, row)
+  return { ...state, messages: next }
+}
+
+/**
+ * A one-line gist of what the tool was asked to do.
+ *
+ * Deliberately short and deliberately inert: tool input is untrusted, and a
+ * card is a summary, not a viewer. The full value stays out of the transcript
+ * rather than being truncated mid-token into something misleading.
+ */
+function summariseToolInput(event: SessionToolEvent): string {
+  const input = event.input ?? event.args
+  if (input == null) return ''
+  if (typeof input === 'string') return oneLine(input)
+
+  if (typeof input === 'object' && !Array.isArray(input)) {
+    const obj = input as Record<string, unknown>
+    // The fields that actually identify what a tool is doing, in the order a
+    // reader cares about them.
+    for (const key of ['command', 'file_path', 'path', 'pattern', 'query', 'url', 'prompt']) {
+      const value = obj[key]
+      if (typeof value === 'string' && value.trim()) return oneLine(value)
+    }
+    const first = Object.values(obj).find((v) => typeof v === 'string' && v.trim())
+    if (typeof first === 'string') return oneLine(first)
+  }
+
+  return ''
+}
+
+const MAX_SUMMARY = 160
+
+function oneLine(text: string): string {
+  const flat = text.replace(/\s+/g, ' ').trim()
+  return flat.length > MAX_SUMMARY ? `${flat.slice(0, MAX_SUMMARY)}…` : flat
 }
 
 // ─── User messages and the outbox ───
