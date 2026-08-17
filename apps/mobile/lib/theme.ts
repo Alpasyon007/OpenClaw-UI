@@ -15,6 +15,7 @@
  */
 import { useMemo } from 'react'
 import { useColorScheme } from 'react-native'
+import * as SecureStore from 'expo-secure-store'
 import { create } from 'zustand'
 import {
   BUILT_IN_THEMES,
@@ -25,18 +26,69 @@ import {
 
 export type ThemeMode = 'system' | 'light' | 'dark'
 
+const MODE_KEY = 'openclaw.theme.mode'
+const THEME_KEY = 'openclaw.theme.id'
+
+/** The brand theme. Falls back only if the presets are ever emptied. */
+const DEFAULT_THEME_ID = BUILT_IN_THEMES[0]?.id ?? 'openclaw'
+
 interface ThemeStore {
   mode: ThemeMode
   themeId: string
+  /** False until stored preferences have been read. */
+  hydrated: boolean
   setMode: (mode: ThemeMode) => void
   setThemeId: (id: string) => void
+  hydrate: () => Promise<void>
 }
+
+const isMode = (v: unknown): v is ThemeMode => v === 'system' || v === 'light' || v === 'dark'
 
 export const useThemeStore = create<ThemeStore>((set) => ({
   mode: 'system',
-  themeId: BUILT_IN_THEMES[0]?.id ?? 'openclaw',
-  setMode: (mode) => set({ mode }),
-  setThemeId: (themeId) => set({ themeId }),
+  themeId: DEFAULT_THEME_ID,
+  hydrated: false,
+
+  setMode: (mode) => {
+    set({ mode })
+    void SecureStore.setItemAsync(MODE_KEY, mode)
+  },
+
+  setThemeId: (themeId) => {
+    set({ themeId })
+    void SecureStore.setItemAsync(THEME_KEY, themeId)
+  },
+
+  /**
+   * Restore stored preferences.
+   *
+   * Both values are validated against what actually exists rather than trusted:
+   * a theme id from an older build whose preset has since been removed would
+   * otherwise leave the app deriving from `undefined` and rendering nothing.
+   *
+   * `expo-secure-store` is not the natural home for a display preference — it is
+   * a keystore — but it is already in the build, so using it avoids adding a
+   * native module and the rebuild that comes with it. Worth moving to MMKV if
+   * one is added for other reasons.
+   */
+  async hydrate() {
+    try {
+      const [storedMode, storedTheme] = await Promise.all([
+        SecureStore.getItemAsync(MODE_KEY),
+        SecureStore.getItemAsync(THEME_KEY),
+      ])
+      set({
+        mode: isMode(storedMode) ? storedMode : 'system',
+        themeId: BUILT_IN_THEMES.some((t) => t.id === storedTheme)
+          ? (storedTheme as string)
+          : DEFAULT_THEME_ID,
+        hydrated: true,
+      })
+    } catch {
+      // A keystore that cannot be read is not a reason to fail to render.
+      set({ hydrated: true })
+    }
+  },
 }))
 
 export function availableThemes(): Theme[] {
