@@ -1,7 +1,7 @@
 {
   "name": "openclaw-ui",
   "version": "0.1.0",
-  "description": "OpenClaw UI — Desktop Interface for OpenClaw CLI",
+  "description": "OpenClaw UI \u2014 Desktop Interface for OpenClaw CLI",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -33,9 +33,13 @@
     "test:ui": "vitest --ui",
     "coverage": "vitest run --coverage",
     "check:generated": "node scripts/check-generated.mjs",
-    "verify": "npm run typecheck && npm run lint && npm run build && npm run check:generated && npm run test",
+    "verify": "npm run typecheck && npm run lint && npm run build && npm run check:generated && npm run version:check && npm run test",
     "doctor": "bash scripts/doctor.sh",
-    "setup:git": "bash ./commands/setup-git.command"
+    "setup:git": "bash ./commands/setup-git.command",
+    "version:sync": "node scripts/sync-version.mjs",
+    "version:check": "node scripts/sync-version.mjs --check",
+    "icon": "pwsh -NoProfile -File scripts/make-ico.ps1",
+    "dist:installer": "node scripts/build-installer.mjs"
   },
   "dependencies": {
     "node-pty": "^1.1.0"

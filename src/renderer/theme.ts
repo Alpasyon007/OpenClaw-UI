@@ -155,23 +155,41 @@ export const DEFAULT_FULL_WIDTH: WidthSetting = { unit: 'px', value: 700 }
 export const PANEL_PERCENT_MIN = 15
 export const PANEL_PERCENT_MAX = 100
 
-/** Widest panel a display can actually show, leaving the window its margin. */
-export function maxPanelWidthFor(screenWidth: number): number {
-  const usable = Number.isFinite(screenWidth) && screenWidth > 0 ? screenWidth : 1440
-  return Math.max(PANEL_WIDTH_MIN, Math.round(usable - PANEL_WINDOW_MARGIN))
+/**
+ * Widest panel that can actually be shown, leaving the window its margin.
+ *
+ * `maxClientWidth` is the real constraint and comes from the shell: it is the
+ * widest client area the launcher's display can give, frame already deducted.
+ * The screen width is only a fallback for before the first measurement lands —
+ * clamping against the screen alone is what let the panel be set to 1800px on
+ * a window that could never exceed 1200, with the excess silently clipped.
+ */
+export function maxPanelWidthFor(screenWidth: number, maxClientWidth?: number): number {
+  const screen = Number.isFinite(screenWidth) && screenWidth > 0 ? screenWidth : 1440
+  const ceiling =
+    Number.isFinite(maxClientWidth) && (maxClientWidth as number) > 0
+      ? (maxClientWidth as number)
+      : screen
+  return Math.max(PANEL_WIDTH_MIN, Math.round(ceiling - PANEL_WINDOW_MARGIN))
 }
 
-export function clampPanelWidth(px: number, screenWidth: number): number {
+export function clampPanelWidth(px: number, screenWidth: number, maxClientWidth?: number): number {
   if (!Number.isFinite(px)) return DEFAULT_STANDARD_WIDTH.value
-  return Math.round(Math.min(maxPanelWidthFor(screenWidth), Math.max(PANEL_WIDTH_MIN, px)))
+  return Math.round(
+    Math.min(maxPanelWidthFor(screenWidth, maxClientWidth), Math.max(PANEL_WIDTH_MIN, px)),
+  )
 }
 
 /** Turn a stored setting into the px the layout should actually use. */
-export function resolveWidth(setting: WidthSetting, screenWidth: number): number {
+export function resolveWidth(
+  setting: WidthSetting,
+  screenWidth: number,
+  maxClientWidth?: number,
+): number {
   const raw = setting.unit === 'percent'
     ? (screenWidth * setting.value) / 100
     : setting.value
-  return clampPanelWidth(raw, screenWidth)
+  return clampPanelWidth(raw, screenWidth, maxClientWidth)
 }
 
 /** Normalize a setting read from disk — unit and range are both untrusted. */
@@ -398,29 +416,78 @@ export function useColors(): ColorPalette {
   return useThemeStore((s) => s.palette)
 }
 
+/** The launcher's real geometry. See `onWindowMetrics` in the contract. */
+export interface WindowMetrics {
+  /** Work-area width of the display the launcher sits on. */
+  screenWidth: number
+  /** Widest client area that display can show, frame already deducted. */
+  maxClientWidth: number
+  /**
+   * True once the shell has measured. A page-side guess must never overwrite a
+   * real measurement, and a `resize` fires for the shell's own resize too.
+   */
+  reported?: boolean
+}
+
+/**
+ * Geometry to lay out against.
+ *
+ * The authoritative numbers come from the shell, which is the only side that
+ * knows the work area and the window frame. Until the first measurement
+ * arrives these fall back to what the page can see, and the fallback ceiling is
+ * `innerWidth` — the client width right now — because under-reporting the
+ * ceiling merely caps a setting, while over-reporting it clips the panel.
+ *
+ * `window.screen.availWidth` is deliberately not trusted as the ceiling: it
+ * describes the display, not the window, and the two differ by the whole frame
+ * plus whatever the shell clamped away.
+ */
+function readFallbackMetrics(): WindowMetrics {
+  if (typeof window === 'undefined') return { screenWidth: 1440, maxClientWidth: 1440 }
+  const screenWidth = window.screen?.availWidth || window.innerWidth || 1440
+  return { screenWidth, maxClientWidth: window.innerWidth || screenWidth, reported: false }
+}
+
+export function useWindowMetrics(): WindowMetrics {
+  const [metrics, setMetrics] = useState<WindowMetrics>(readFallbackMetrics)
+
+  useEffect(() => {
+    // A resize is the page observing what the shell already did, so it only
+    // refreshes the fallback — a reported measurement always outranks it.
+    const onResize = (): void => {
+      setMetrics((current) =>
+        current.reported ? current : { ...readFallbackMetrics(), reported: false },
+      )
+    }
+    window.addEventListener('resize', onResize)
+
+    const off = window.clui?.onWindowMetrics?.((next) => {
+      if (!next || !Number.isFinite(next.screenWidth) || !Number.isFinite(next.maxClientWidth)) return
+      setMetrics({
+        screenWidth: next.screenWidth,
+        maxClientWidth: next.maxClientWidth,
+        reported: true,
+      })
+    })
+
+    return () => {
+      window.removeEventListener('resize', onResize)
+      if (typeof off === 'function') off()
+    }
+  }, [])
+
+  return metrics
+}
+
 /**
  * Width of the display the launcher is on.
  *
  * Percentage widths are meaningless without it, and it changes when the window
  * is summoned onto another monitor — which is a move, not a resize, so the
- * summon broadcast is the signal that matters here, not just 'resize'.
+ * shell's own measurement is the signal that matters here, not just 'resize'.
  */
 export function useScreenWidth(): number {
-  const read = (): number => (typeof window === 'undefined' ? 1440 : window.screen?.availWidth || window.innerWidth || 1440)
-  const [width, setWidth] = useState(read)
-
-  useEffect(() => {
-    const update = (): void => setWidth(read())
-    window.addEventListener('resize', update)
-    // Summoning can land the launcher on a different display.
-    const off = window.clui?.onWindowShown?.(update)
-    return () => {
-      window.removeEventListener('resize', update)
-      if (typeof off === 'function') off()
-    }
-  }, [])
-
-  return width
+  return useWindowMetrics().screenWidth
 }
 
 /**
@@ -434,9 +501,9 @@ export function usePanelWidth(): number {
   const mode = useThemeStore((s) => s.widthMode)
   const standard = useThemeStore((s) => s.standardWidth)
   const full = useThemeStore((s) => s.fullWidth)
-  const screenWidth = useScreenWidth()
+  const { screenWidth, maxClientWidth } = useWindowMetrics()
 
-  const width = resolveWidth(mode === 'full' ? full : standard, screenWidth)
+  const width = resolveWidth(mode === 'full' ? full : standard, screenWidth, maxClientWidth)
 
   useEffect(() => {
     try {

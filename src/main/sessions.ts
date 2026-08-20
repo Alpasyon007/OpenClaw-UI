@@ -16,7 +16,7 @@ import { existsSync } from 'fs'
 import { readdir, stat } from 'fs/promises'
 import { createInterface } from 'readline'
 import { isAbsolute, join } from 'path'
-import type { SessionMeta } from '../shared/types'
+import type { SessionMeta, SessionLoadMessage } from '../shared/types'
 import { getAgentDataHomes } from './openclaw/runtime'
 import { log as _log } from './logger'
 
@@ -34,6 +34,9 @@ const MIN_TRANSCRIPT_BYTES = 100
 
 /** Most recent sessions shown in the picker. */
 const MAX_SESSIONS = 20
+
+/** Most turns hydrated into a resumed tab. A transcript here can reach 18MB. */
+const MAX_TRANSCRIPT_MESSAGES = 500
 
 /**
  * How far into a transcript to read for its metadata.
@@ -63,7 +66,7 @@ export function encodeProjectDir(cwd: string): string {
  * Windows drive letters appear in either case on disk, so fall back to a
  * case-insensitive scan before giving up.
  */
-async function findSessionDir(cwd: string): Promise<string | null> {
+export async function findSessionDir(cwd: string): Promise<string | null> {
   const encoded = encodeProjectDir(cwd)
   for (const home of getAgentDataHomes()) {
     const exact = join(home, 'projects', encoded)
@@ -182,4 +185,84 @@ export async function listSessions(projectPath?: string): Promise<SessionMeta[]>
     log(`listSessions error: ${String(err)}`)
     return []
   }
+}
+
+/**
+ * Read a local transcript into the messages the renderer hydrates a tab with.
+ *
+ * The IPC handler behind this used to join the *project* cwd with
+ * `<id>.jsonl` — which is not where transcripts live — so every resume
+ * ENOENTed. Worse, it answered `{ ok, content }` where the contract declares
+ * `SessionLoadMessage[]`, so the renderer's `.map()` threw past its own
+ * `.catch()` and the outer handler quietly built a second, unregistered tab.
+ * Resuming a session has therefore been opening an empty conversation.
+ *
+ * Returns `[]` rather than throwing: an unreadable transcript is a normal
+ * state, and the caller renders this directly.
+ */
+export async function readLocalTranscript(
+  sessionId: string,
+  projectPath?: string,
+): Promise<SessionLoadMessage[]> {
+  // A gateway session key ('agent:main:main') is not a transcript id, and on
+  // Windows `agent:main:main.jsonl` names an NTFS alternate data stream rather
+  // than a file. Reject anything that is not a UUID before it reaches join().
+  if (!UUID_RE.test(String(sessionId ?? ''))) {
+    log(`readLocalTranscript: not a transcript id: ${String(sessionId)}`)
+    return []
+  }
+  const cwd = projectPath || process.cwd()
+  if (!isSafeAbsolutePath(cwd)) return []
+  const dir = await findSessionDir(cwd)
+  if (!dir) {
+    log(`readLocalTranscript: no session directory for ${encodeProjectDir(cwd)}`)
+    return []
+  }
+
+  const filePath = join(dir, `${sessionId}.jsonl`)
+  const out: SessionLoadMessage[] = []
+  const stream = createReadStream(filePath, { encoding: 'utf-8' })
+  const rl = createInterface({ input: stream })
+  try {
+    for await (const line of rl) {
+      try {
+        const obj = JSON.parse(line) as {
+          type?: string
+          timestamp?: string
+          message?: { content?: unknown }
+        }
+        if (obj.type !== 'user' && obj.type !== 'assistant') continue
+        const timestamp = Date.parse(obj.timestamp ?? '') || 0
+        const content = obj.message?.content
+        if (typeof content === 'string') {
+          if (content) out.push({ role: obj.type, content, timestamp })
+        } else if (Array.isArray(content)) {
+          const parts = content as Array<{ type?: string; text?: string; name?: string }>
+          const text = parts
+            .filter((p) => p?.type === 'text')
+            .map((p) => p.text ?? '')
+            .join('\n\n')
+            .trim()
+          if (text) out.push({ role: obj.type, content: text, timestamp })
+          for (const p of parts) {
+            if (p?.type === 'tool_use' && p.name) {
+              out.push({ role: 'tool', content: '', toolName: p.name, timestamp })
+            }
+          }
+        }
+        // Rolling window: an 18MB transcript must never be held in full just to
+        // render its tail.
+        while (out.length > MAX_TRANSCRIPT_MESSAGES) out.shift()
+      } catch {
+        // A partial or non-JSON line proves nothing about the rest.
+      }
+    }
+  } catch (err) {
+    log(`readLocalTranscript ${sessionId}: ${String(err)}`)
+  } finally {
+    rl.close()
+    stream.destroy()
+  }
+  log(`readLocalTranscript ${sessionId}: ${out.length} message(s)`)
+  return out
 }

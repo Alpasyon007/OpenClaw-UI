@@ -174,6 +174,14 @@ export interface TabState {
   additionalDirs: string[]
   /** Live gateway connectivity for this tab's last/current run */
   gatewayState: GatewayConnectionState
+  /**
+   * Which store this tab's session came from. `null` for tabs never resumed.
+   *
+   * Pinned so a gateway-resumed tab keeps addressing the gateway. The same key
+   * under a local runtime names a *different*, empty conversation that answers
+   * perfectly normally — the failure is silent, so it is guarded structurally.
+   */
+  sessionOrigin: SessionOrigin | null
 }
 
 export interface Message {
@@ -348,6 +356,79 @@ export interface SessionLoadMessage {
   timestamp: number
 }
 
+// ─── Gateway Sessions ───
+
+/**
+ * A session in the OpenClaw gateway's own store, as listed by
+ * `openclaw gateway call sessions.list`.
+ *
+ * Deliberately not a {@link SessionMeta}. A gateway session is addressed by a
+ * *key* (`agent:<agentId>:<name>`) and reattached with `--session-key`, which
+ * names a live gateway session; `SessionMeta.sessionId` is a transcript-file
+ * UUID handed to `--resume`, which replays a recorded one. A gateway session
+ * has no file on this machine, so no byte size and no project directory. Two
+ * identifiers with two meanings do not belong in one struct.
+ */
+export interface GatewaySessionMeta {
+  /** Exactly the value `--session-key` takes. */
+  sessionKey: string
+  /** The gateway's own session id, when reported. Diagnostics only. */
+  sessionId: string | null
+  /** The gateway's own title, when it has one. Absent for `clui-*` sessions. */
+  displayName: string | null
+  /** Passed through, never parsed. Uniformly 'direct' on observed gateways. */
+  kind: string | null
+  /** ISO-8601, from lastActivityAt ?? updatedAt ?? endedAt ?? startedAt. */
+  lastTimestamp: string | null
+  model: string | null
+  totalTokens: number | null
+  status: string | null
+  hasActiveRun: boolean
+  archived: boolean
+  pinned: boolean
+  unread: boolean
+}
+
+/**
+ * Why a gateway session listing is unavailable.
+ *
+ * `unsupported` means there is nothing here to show — no gateway configured,
+ * or one that does not implement `sessions.list`. The picker hides the group
+ * entirely: a capability this install cannot use is a normal state, not an
+ * error, exactly as a missing `skills list` is treated in the marketplace.
+ */
+export type GatewaySessionsUnavailableReason = 'no-credential' | 'unsupported' | 'unreachable'
+
+/** Result of `listGatewaySessions`. Never throws, never blanks the local list. */
+export interface GatewaySessionListResult {
+  ok: boolean
+  /** False when no listing could be produced — the picker hides or annotates. */
+  available: boolean
+  sessions: GatewaySessionMeta[]
+  /** Set only when `available` is false. */
+  reason: GatewaySessionsUnavailableReason | null
+  /** One human sentence. Never a stack trace, never raw CLI output. */
+  error: string | null
+  /** ms epoch when produced. */
+  fetchedAt: number
+}
+
+/** Result of `loadGatewaySession` — a read-only copy of a gateway transcript. */
+export interface GatewaySessionHistoryResult {
+  ok: boolean
+  sessionKey: string
+  /** Oldest-to-newest, even though the wire pages newest-first. */
+  messages: SessionLoadMessage[]
+  /** The gateway holds more turns than `messages` carries. */
+  truncated: boolean
+  /** Total the gateway reports, or null. */
+  totalMessages: number | null
+  error: string | null
+}
+
+/** Which store a resumed tab's session came from. */
+export type SessionOrigin = 'local' | 'gateway'
+
 // ─── Marketplace / Plugin Types ───
 
 export type PluginStatus = 'not_installed' | 'checking' | 'installing' | 'installed' | 'failed'
@@ -430,6 +511,8 @@ export const IPC = {
   SET_WINDOW_WIDTH: 'clui:set-window-width',
   HIDE_WINDOW: 'clui:hide-window',
   WINDOW_SHOWN: 'clui:window-shown',
+  /** shell -> renderer: the launcher's real geometry, after it was placed. */
+  WINDOW_METRICS: 'clui:window-metrics',
   SET_IGNORE_MOUSE_EVENTS: 'clui:set-ignore-mouse-events',
   IS_VISIBLE: 'clui:is-visible',
   DRAG_HOLDING: 'clui:drag-holding',
@@ -472,6 +555,8 @@ export const IPC = {
   GATEWAY_CONFIG_SET: 'clui:gateway-config-set',
   GET_CONNECTION_TARGET: 'clui:get-connection-target',
   SET_CONNECTION_TARGET: 'clui:set-connection-target',
+  LIST_GATEWAY_SESSIONS: 'clui:list-gateway-sessions',
+  LOAD_GATEWAY_SESSION: 'clui:load-gateway-session',
   GET_SHORTCUTS: 'clui:get-shortcuts',
 
   // Theming + branding

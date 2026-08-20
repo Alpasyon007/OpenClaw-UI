@@ -1,5 +1,36 @@
 cmake_minimum_required(VERSION 3.25)
-project(openclaw-shell LANGUAGES CXX VERSION 0.1.0)
+
+# ─── Version ───
+#
+# Read from the repo's package.json rather than written here as well. There is
+# exactly one place the version is authored; copying it into a second file is
+# how a shell reporting 0.1.0 ends up inside an installer labelled 0.3.0.
+#
+# `project(VERSION)` accepts only numbers, so a semver prerelease
+# (0.2.0-rc.1) is reduced to its release core here. The full string survives in
+# OPENCLAW_VERSION_STRING and reaches the Windows resource and the installer,
+# which are the two places a human reads it.
+file(READ "${CMAKE_CURRENT_SOURCE_DIR}/../package.json" _openclaw_pkg)
+string(JSON OPENCLAW_VERSION_STRING GET "${_openclaw_pkg}" version)
+if (NOT OPENCLAW_VERSION_STRING MATCHES "^([0-9]+)\.([0-9]+)\.([0-9]+)")
+  message(FATAL_ERROR "shell: package.json version is not semver: ${OPENCLAW_VERSION_STRING}")
+endif()
+set(OPENCLAW_VERSION_CORE "${CMAKE_MATCH_1}.${CMAKE_MATCH_2}.${CMAKE_MATCH_3}")
+
+project(openclaw-shell LANGUAGES CXX VERSION ${OPENCLAW_VERSION_CORE})
+
+# The fourth component of the Windows FILEVERSION. 0 for a local build; CI
+# passes its run number so two builds of the same version are distinguishable
+# and the newer one actually compares as newer.
+set(OPENCLAW_BUILD_NUMBER "0" CACHE STRING "Fourth component of the Windows FILEVERSION")
+
+set(OPENCLAW_PRODUCT_NAME  "OpenClaw UI")
+set(OPENCLAW_INTERNAL_NAME "openclaw-shell")
+set(OPENCLAW_COMPANY       "OpenClaw")
+set(OPENCLAW_DESCRIPTION   "OpenClaw UI — desktop interface for the OpenClaw CLI")
+set(OPENCLAW_COPYRIGHT     "Copyright (C) OpenClaw contributors. MIT licensed.")
+
+message(STATUS "shell: version ${OPENCLAW_VERSION_STRING} (build ${OPENCLAW_BUILD_NUMBER})")
 
 # GUI subsystem means no console window — but it also means std::println goes
 # nowhere, which hides startup failures. Build with -Dshell_console=ON to get a
@@ -17,6 +48,29 @@ else()
 endif()
 
 target_sources(${PROJECT_NAME} PRIVATE "src/main.cpp")
+
+# ─── Windows version resource and icon ───
+#
+# Without this the executable carries no version information at all: Explorer's
+# Details tab is blank, and an installer comparing versions to decide whether it
+# is upgrading has nothing to read.
+if (WIN32)
+  set(OPENCLAW_VERSION_QUAD
+      "${PROJECT_VERSION_MAJOR},${PROJECT_VERSION_MINOR},${PROJECT_VERSION_PATCH},${OPENCLAW_BUILD_NUMBER}")
+
+  # The .rc is preprocessed by the resource compiler, which treats a backslash
+  # in a quoted string as an escape. Forward slashes are accepted on Windows and
+  # sidestep the whole question.
+  file(TO_CMAKE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/../resources/icon.ico" OPENCLAW_ICON_RC_PATH)
+  if (NOT EXISTS "${OPENCLAW_ICON_RC_PATH}")
+    message(FATAL_ERROR
+            "shell: ${OPENCLAW_ICON_RC_PATH} is missing. Generate it with: pwsh -File scripts/make-ico.ps1")
+  endif()
+
+  configure_file("${CMAKE_CURRENT_SOURCE_DIR}/src/version.rc.in"
+                 "${CMAKE_CURRENT_BINARY_DIR}/version.rc" @ONLY)
+  target_sources(${PROJECT_NAME} PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/version.rc")
+endif()
 
 # saucer requires C++23 and enforces MSVC >= 19.44 at configure time.
 target_compile_features(${PROJECT_NAME} PRIVATE cxx_std_23)

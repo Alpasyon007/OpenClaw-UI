@@ -8,6 +8,7 @@
  * quickly.
  */
 import { create } from 'zustand'
+import Constants from 'expo-constants'
 import * as SecureStore from 'expo-secure-store'
 import {
   CapabilityCache,
@@ -54,6 +55,15 @@ const URL_KEY = 'openclaw.gateway.url'
 const NOTIFIER_KEY = 'openclaw.notifier.url'
 
 export const DEFAULT_URL = 'wss://openclaw-gateway-production-091e.up.railway.app'
+
+/**
+ * The app's version, read from app.json rather than written out again.
+ *
+ * It goes to the gateway on every connect and shows up in `openclaw devices
+ * list`, so a stale literal here means the operator is told the wrong build is
+ * connected — which is exactly the thing they would be checking.
+ */
+const APP_VERSION = Constants.expoConfig?.version ?? '0.0.0'
 
 export type ConnState = 'idle' | 'connecting' | 'ready' | 'pairing' | 'error'
 
@@ -294,7 +304,7 @@ export const useApp = create<AppState>((set, get) => ({
       scopes,
       client: {
         id: 'openclaw-android',
-        version: '0.1.0',
+        version: APP_VERSION,
         platform: 'android',
         mode: 'ui',
         deviceFamily: 'Companion',

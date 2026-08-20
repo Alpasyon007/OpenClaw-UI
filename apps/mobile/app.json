@@ -9,11 +9,13 @@
     "newArchEnabled": true,
     "android": {
       "package": "dev.openclaw.companion",
-      "edgeToEdgeEnabled": true
+      "edgeToEdgeEnabled": true,
+      "versionCode": 100
     },
     "ios": {
       "bundleIdentifier": "dev.openclaw.companion",
-      "supportsTablet": true
+      "supportsTablet": true,
+      "buildNumber": "100"
     },
     "plugins": [
       "expo-router",

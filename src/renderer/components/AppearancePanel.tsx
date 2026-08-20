@@ -4,7 +4,7 @@ import {
 } from '@phosphor-icons/react'
 import {
   useColors, useThemeStore, BUILT_IN_THEMES,
-  useScreenWidth, resolveWidth, maxPanelWidthFor,
+  useWindowMetrics, resolveWidth, maxPanelWidthFor,
   PANEL_WIDTH_MIN, PANEL_PERCENT_MIN, PANEL_PERCENT_MAX,
   type WidthSetting,
 } from '../theme'
@@ -53,7 +53,7 @@ export function AppearancePanel() {
   const standardWidth = useThemeStore((s) => s.standardWidth)
   const fullWidth = useThemeStore((s) => s.fullWidth)
   const setWidthSetting = useThemeStore((s) => s.setWidthSetting)
-  const screenWidth = useScreenWidth()
+  const { screenWidth, maxClientWidth } = useWindowMetrics()
 
   const [status, setStatus] = useState<string | null>(null)
 
@@ -141,8 +141,8 @@ export function AppearancePanel() {
         <div style={{ fontSize: 10, color: colors.textTertiary, marginBottom: 9, lineHeight: 1.45 }}>
           The launcher has two widths and the quick-settings toggle picks between them. Set each
           one in pixels, or as a share of the screen so it follows whatever display you summon it
-          on. This screen is {screenWidth}px wide; the widest panel it can show is{' '}
-          {maxPanelWidthFor(screenWidth)}px.
+          on. This screen is {screenWidth}px wide; the widest panel the launcher window can show
+          is {maxPanelWidthFor(screenWidth, maxClientWidth)}px.
         </div>
 
         <div style={{ display: 'flex', gap: 6, marginBottom: 10, alignItems: 'center' }}>
@@ -156,6 +156,7 @@ export function AppearancePanel() {
           hint="Full width toggled off"
           setting={standardWidth}
           screenWidth={screenWidth}
+          maxClientWidth={maxClientWidth}
           active={widthMode === 'standard'}
           onChange={(s) => setWidthSetting('standard', s)}
           colors={colors}
@@ -165,6 +166,7 @@ export function AppearancePanel() {
           hint="Full width toggled on"
           setting={fullWidth}
           screenWidth={screenWidth}
+          maxClientWidth={maxClientWidth}
           active={widthMode === 'full'}
           onChange={(s) => setWidthSetting('full', s)}
           colors={colors}
@@ -227,17 +229,19 @@ export function AppearancePanel() {
  * expressed. The resolved px is always shown, because a percentage tells you
  * nothing about whether the result still fits.
  */
-function WidthEditor({ label, hint, setting, screenWidth, active, onChange, colors }: {
+function WidthEditor({ label, hint, setting, screenWidth, maxClientWidth, active, onChange, colors }: {
   label: string
   hint: string
   setting: WidthSetting
   screenWidth: number
+  /** The window's real ceiling, so the slider cannot offer a clipped width. */
+  maxClientWidth: number
   active: boolean
   onChange: (setting: WidthSetting) => void
   colors: Colors
 }) {
-  const resolved = resolveWidth(setting, screenWidth)
-  const maxPx = maxPanelWidthFor(screenWidth)
+  const resolved = resolveWidth(setting, screenWidth, maxClientWidth)
+  const maxPx = maxPanelWidthFor(screenWidth, maxClientWidth)
   const isPercent = setting.unit === 'percent'
 
   const switchUnit = (unit: WidthSetting['unit']): void => {

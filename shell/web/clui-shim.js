@@ -4,7 +4,7 @@
 // bridge, so the renderer bundle runs unmodified. Loaded as a classic script
 // before the app module, because window.clui must exist before React mounts.
 //
-// Derived from src/shared/clui-contract.ts: 46 invoke, 12 send, 11 subscription methods.
+// Derived from src/shared/clui-contract.ts: 48 invoke, 12 send, 12 subscription methods.
 (function () {
   // saucer's exposed functions are not installed yet when this classic script
   // runs, so buffer and flush. Losing the boot log to a swallowed exception is
@@ -134,6 +134,8 @@
     gatewayConfigSet: function (patch) { return invoke("clui:gateway-config-set", patch); },
     getConnectionTarget: function () { return invoke("clui:get-connection-target"); },
     setConnectionTarget: function (target) { return invoke("clui:set-connection-target", target); },
+    listGatewaySessions: function () { return invoke("clui:list-gateway-sessions"); },
+    loadGatewaySession: function (sessionKey) { return invoke("clui:load-gateway-session", { sessionKey }); },
     getShortcuts: function () { return invoke("clui:get-shortcuts"); },
     exportTheme: function (theme, suggestedName) { return invoke("clui:theme-export", { theme, suggestedName }); },
     importTheme: function () { return invoke("clui:theme-import"); },
@@ -162,6 +164,7 @@
     onStartInfo: function (callback) { return on("clui:start-info", callback); },
     onNodeStatusUpdate: function (callback) { return on("clui:node-status-update", callback); },
     onWindowShown: function (callback) { return on("clui:window-shown", callback); },
+    onWindowMetrics: function (callback) { return on("clui:window-metrics", callback); },
     onWindowPrepare: function (callback) { return on("clui:window-prepare", callback); },
     onWindowDismiss: function (callback) { return on("clui:window-dismiss", callback); },
     onShortcutAction: function (callback) { return on("clui:shortcut-action", callback); },
@@ -239,6 +242,17 @@
     }
   };
 
+  // Resizing the launcher is a window concern. Forwarded to Node it hit a
+  // no-op handler, so the panel width setting changed the page layout while
+  // the native window stayed at its compile-time width and clipped everything
+  // past it. The shell recentres as it resizes and reports the real geometry
+  // back on clui:window-metrics.
+  window.clui.setWindowWidth = function (width) {
+    if (window.saucer && window.saucer.exposed && window.saucer.exposed.set_window_width) {
+      window.saucer.exposed.set_window_width(width | 0);
+    }
+  };
+
   // ─── Native UI ───
   //
   // Dialogs and screen capture need an owner HWND and the desktop DC, so C++
@@ -301,7 +315,7 @@
   };
 
   // Diagnostics the shell reads back out.
-  window.clui.__meta = { invokes: 46, sends: 12, events: 11 };
+  window.clui.__meta = { invokes: 48, sends: 12, events: 12 };
   shellLog('clui shim installed: ' + JSON.stringify(window.clui.__meta));
   window.addEventListener('DOMContentLoaded', function () {
     shellLog('DOMContentLoaded; root children=' + (document.getElementById('root') || {}).childElementCount);

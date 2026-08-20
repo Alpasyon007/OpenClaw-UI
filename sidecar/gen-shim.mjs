@@ -261,6 +261,17 @@ ${events
     }
   };
 
+  // Resizing the launcher is a window concern. Forwarded to Node it hit a
+  // no-op handler, so the panel width setting changed the page layout while
+  // the native window stayed at its compile-time width and clipped everything
+  // past it. The shell recentres as it resizes and reports the real geometry
+  // back on clui:window-metrics.
+  window.clui.setWindowWidth = function (width) {
+    if (window.saucer && window.saucer.exposed && window.saucer.exposed.set_window_width) {
+      window.saucer.exposed.set_window_width(width | 0);
+    }
+  };
+
   // ─── Native UI ───
   //
   // Dialogs and screen capture need an owner HWND and the desktop DC, so C++

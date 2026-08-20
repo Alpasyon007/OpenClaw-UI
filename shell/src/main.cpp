@@ -75,9 +75,40 @@ namespace
 #endif
     }
 
+    /**
+     * Where the trace goes.
+     *
+     * Next to the executable is fine for a dev build and wrong for an installed
+     * one: Program Files is not writable by a normal user, `fopen` simply fails,
+     * and {@link trace} is best-effort — so the log silently disappears exactly
+     * when someone is diagnosing a bad install. LocalAppData is writable
+     * whichever way the installer placed the app; the exe directory stays as the
+     * fallback so a portable unzip still logs beside itself.
+     *
+     * Resolved once: this runs for every trace line, and the directory cannot
+     * change while the process is alive.
+     */
+    const fs::path &log_path()
+    {
+        static const fs::path resolved = []
+        {
+#ifdef _WIN32
+            if (const wchar_t *base = _wgetenv(L"LOCALAPPDATA"); base && *base)
+            {
+                const auto dir = fs::path{base} / L"OpenClaw";
+                std::error_code ec;
+                fs::create_directories(dir, ec);
+                if (!ec) return dir / "shell.log";
+            }
+#endif
+            return exe_dir() / "shell.log";
+        }();
+        return resolved;
+    }
+
     void trace(std::string_view msg)
     {
-        const auto path = (exe_dir() / "spike.log").string();
+        const auto path = log_path().string();
         if (FILE *f = std::fopen(path.c_str(), "a"))
         {
             std::fprintf(f, "%.*s\n", static_cast<int>(msg.size()), msg.data());
@@ -422,6 +453,8 @@ coco::stray start(saucer::application *app)
     static std::atomic_bool launcher_on_screen{true};
     static saucer::position on_screen_pos{};
     static int park_x = 0;
+    /** Width the page last asked for. Re-placing must not lose the setting. */
+    static std::atomic_int wanted_client_w{kWinWidth};
 
     {
         const auto pos = window->position();
@@ -445,7 +478,89 @@ coco::stray start(saucer::application *app)
                   });
     };
 
-    const auto reveal = [app, window, send_event](int gen)
+    // ─── Launcher geometry ───
+    //
+    // The panel width is a user setting, and honouring it means resizing the
+    // native window: the renderer lays the card out at whatever width it was
+    // told, and anything past the window's client area is clipped rather than
+    // shown. That resize existed under Electron (SET_WINDOW_WIDTH in the main
+    // process) and was lost in the port — the sidecar answers the channel with
+    // a no-op, and nothing else listened, so the window stayed pinned at
+    // kWinWidth while the page happily laid out to 1800.
+    //
+    // Deliberately measured against the PRIMARY monitor, matching the startup
+    // placement above. MONITOR_DEFAULTTONEAREST would be wrong here: the
+    // launcher spends most of its life parked off the left of the virtual
+    // desktop, and "nearest" to a parked window is the leftmost display, not
+    // the one it appears on.
+    const auto place_launcher = [app, window, send_event](int desired_client_w)
+    {
+        const auto hwnd = window->native().hwnd;
+        RECT wr{}, cr{};
+        if (!GetWindowRect(hwnd, &wr) || !GetClientRect(hwnd, &cr)) return;
+
+        // Measured, not assumed: even with decoration::none the frame is
+        // 16x39 here, and treating it as zero pushes the window off the work
+        // area by exactly that much.
+        const auto frame_w = (wr.right - wr.left) - (cr.right - cr.left);
+        const auto frame_h = (wr.bottom - wr.top) - (cr.bottom - cr.top);
+
+        MONITORINFO mi{.cbSize = sizeof(MONITORINFO)};
+        const auto primary = MonitorFromPoint(POINT{0, 0}, MONITOR_DEFAULTTOPRIMARY);
+        if (!GetMonitorInfoW(primary, &mi)) return;
+        const auto work = mi.rcWork;
+
+        // std::clamp throughout: <windows.h> defines min and max as
+        // function-like macros, so std::min(/std::max( do not compile here.
+        const auto avail_w = std::clamp((work.right - work.left) - frame_w, 320L, 32000L);
+        const auto avail_h = std::clamp((work.bottom - work.top) - frame_h - kBottomMargin - kTopMargin,
+                                        360L, 32000L);
+
+        wanted_client_w.store(desired_client_w);
+        const auto client_w =
+            static_cast<int>(std::clamp(static_cast<LONG>(desired_client_w), 320L, avail_w));
+        const auto client_h =
+            static_cast<int>(std::clamp(static_cast<LONG>(kWinHeight), 360L, avail_h));
+
+        window->set_size({.w = client_w, .h = client_h});
+
+        const auto outer_w = client_w + frame_w;
+        const auto outer_h = client_h + frame_h;
+
+        // The launcher is bottom-centred, so a width change has to recentre it
+        // or the card drifts left by half the delta. on_screen_pos is also what
+        // `reveal` restores, so it must be updated even while parked.
+        on_screen_pos = {
+            .x = static_cast<int>(work.left + ((work.right - work.left) - outer_w) / 2),
+            .y = static_cast<int>(work.bottom - outer_h - kBottomMargin),
+        };
+        // Recomputed from the real outer width: a wider window parked at the
+        // old offset leaves its right edge on screen.
+        park_x = static_cast<int>(GetSystemMetrics(SM_XVIRTUALSCREEN) - outer_w - 100);
+
+        if (launcher_on_screen.load()) window->set_position(on_screen_pos);
+
+        // Tell the page what it actually got. Without this the renderer clamps
+        // percentage widths against window.screen.availWidth and offers sizes
+        // the window cannot display.
+        send_event("clui:window-metrics",
+                   "{\"screenWidth\":" + std::to_string(work.right - work.left) +
+                       ",\"maxClientWidth\":" + std::to_string(avail_w) + "}");
+
+        trace("placed launcher: client " + std::to_string(client_w) + "x" +
+              std::to_string(client_h) + ", max " + std::to_string(avail_w));
+    };
+
+    // Page -> shell. Routed here by the shim rather than to the sidecar, which
+    // answers it with a no-op.
+    view->expose("set_window_width",
+                 [app, place_launcher](int width)
+                 {
+                     // expose runs off the UI thread; every window call must hop.
+                     app->post([place_launcher, width] { place_launcher(width); });
+                 });
+
+    const auto reveal = [app, window, send_event, place_launcher](int gen)
     {
         // Consume the generation so the ack and the watchdog cannot both fire.
         int expected = gen;
@@ -455,6 +570,10 @@ coco::stray start(saucer::application *app)
         // onWindowShown takes no arguments, so the list is empty rather than
         // carrying a null the handler would receive as a parameter.
         send_event("clui:window-shown", "");
+        // Re-measure on the way in: the work area can change while parked
+        // (a taskbar move, a scaling change), and the page would otherwise
+        // keep clamping against the numbers from boot.
+        app->post([place_launcher] { place_launcher(wanted_client_w.load()); });
         trace("reveal gen=" + std::to_string(gen));
     };
 

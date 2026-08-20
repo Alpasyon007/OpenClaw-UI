@@ -42,6 +42,24 @@ const DEFAULTS: Record<string, unknown> = {
   tabHealth: { tabs: [] },
   listSessions: [],
   loadSession: [],
+  // Default to "no gateway to speak of", so every existing test renders the
+  // picker exactly as it did before gateway sessions existed.
+  listGatewaySessions: {
+    ok: false,
+    available: false,
+    sessions: [],
+    reason: 'unsupported',
+    error: null,
+    fetchedAt: 0,
+  },
+  loadGatewaySession: {
+    ok: true,
+    sessionKey: '',
+    messages: [],
+    truncated: false,
+    totalMessages: null,
+    error: null,
+  },
   fetchMarketplace: { plugins: [], error: null },
   listInstalledPlugins: [],
   getShortcuts: { platform: 'win32', shortcuts: [] },

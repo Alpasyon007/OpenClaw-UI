@@ -1,5 +1,5 @@
 import { IPC } from './types'
-import type { RunOptions, NormalizedEvent, HealthReport, EnrichedError, Attachment, SessionMeta, CatalogPlugin, SessionLoadMessage, ConnectionTarget, GatewayConfigView, NodeAction, NodeHostStatus } from './types'
+import type { RunOptions, NormalizedEvent, HealthReport, EnrichedError, Attachment, SessionMeta, CatalogPlugin, SessionLoadMessage, ConnectionTarget, GatewayConfigView, NodeAction, NodeHostStatus, GatewaySessionListResult, GatewaySessionHistoryResult } from './types'
 import type { ShortcutDef } from './shortcuts'
 import type { Theme } from './theme-types'
 
@@ -104,6 +104,15 @@ export interface CluiAPI {
   gatewayConfigSet(patch: { mode?: 'local' | 'remote'; remoteUrl?: string; tokenEnvVar?: string }): Promise<{ ok: boolean; error?: string }>
   getConnectionTarget(): Promise<ConnectionTarget>
   setConnectionTarget(target: ConnectionTarget): Promise<{ ok: boolean; error?: string }>
+  /**
+   * Sessions held by the gateway rather than by this machine.
+   *
+   * Never rejects and never throws: an unreachable, credential-less or older
+   * gateway comes back as `available: false` with a reason, so the local
+   * session list it renders beside can never be disturbed by it.
+   */
+  listGatewaySessions(): Promise<GatewaySessionListResult>
+  loadGatewaySession(sessionKey: string): Promise<GatewaySessionHistoryResult>
   getShortcuts(): Promise<{ platform: string; shortcuts: ShortcutDef[] }>
 
   // ─── Theming + branding ───
@@ -135,6 +144,16 @@ export interface CluiAPI {
   /** Fires when a background refresh produces a fresher node host status. */
   onNodeStatusUpdate(callback: (status: NodeHostStatus) => void): () => void
   onWindowShown(callback: () => void): () => void
+  /**
+   * shell -> renderer: what the launcher window actually is, after placement.
+   *
+   * `screenWidth` is the work area of the display it sits on and
+   * `maxClientWidth` the widest client area that display can show. The
+   * renderer needs both: percentage widths resolve against the first, and the
+   * second is the real ceiling — clamping against `window.screen.availWidth`
+   * offers widths the window cannot display, and the excess is clipped.
+   */
+  onWindowMetrics(callback: (metrics: { screenWidth: number; maxClientWidth: number }) => void): () => void
   /** main -> renderer: settle the DOM; the window is about to be revealed. */
   onWindowPrepare(callback: (generation: number) => void): () => void
   onWindowDismiss(callback: (generation: number) => void): () => void
@@ -194,6 +213,8 @@ const api: CluiAPI = {
   gatewayConfigSet: (patch) => invoke(IPC.GATEWAY_CONFIG_SET, patch),
   getConnectionTarget: () => invoke(IPC.GET_CONNECTION_TARGET),
   setConnectionTarget: (target) => invoke(IPC.SET_CONNECTION_TARGET, target),
+  listGatewaySessions: () => invoke(IPC.LIST_GATEWAY_SESSIONS),
+  loadGatewaySession: (sessionKey) => invoke(IPC.LOAD_GATEWAY_SESSION, { sessionKey }),
   getShortcuts: () => invoke(IPC.GET_SHORTCUTS),
 
   // ─── Theming + branding ───
@@ -224,6 +245,7 @@ const api: CluiAPI = {
   onStartInfo: (callback) => subscribe(IPC.START_INFO, callback),
   onNodeStatusUpdate: (callback) => subscribe(IPC.NODE_STATUS_UPDATE, callback),
   onWindowShown: (callback) => subscribe(IPC.WINDOW_SHOWN, callback),
+  onWindowMetrics: (callback) => subscribe(IPC.WINDOW_METRICS, callback),
   onWindowPrepare: (callback) => subscribe(IPC.WINDOW_PREPARE, callback),
   onWindowDismiss: (callback) => subscribe(IPC.WINDOW_DISMISS, callback),
   onShortcutAction: (callback) => subscribe('clui:shortcut-action', callback),

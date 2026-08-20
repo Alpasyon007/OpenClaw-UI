@@ -1,0 +1,55 @@
+// Generated from version.rc.in at CMake configure time — do not edit.
+//
+// Two different things live in here and they are not interchangeable:
+//
+//   FILEVERSION / PRODUCTVERSION      four 16-bit integers, compared
+//                                     numerically by Windows and by the
+//                                     installer's upgrade check.
+//   "FileVersion" / "ProductVersion"  free strings, shown to humans.
+//
+// A semver prerelease is legal in the strings and impossible in the integers,
+// so the numeric fields carry the release core and the strings carry the whole
+// thing. Without this resource the shell shipped with no version at all: the
+// Details tab was blank, and an installer had nothing to compare against when
+// deciding whether it was upgrading or downgrading.
+
+#include <winver.h>
+
+// The application icon. Explorer, the taskbar and Alt-Tab use the lowest
+// ordinal, so this must stay first.
+1 ICON "@OPENCLAW_ICON_RC_PATH@"
+
+VS_VERSION_INFO VERSIONINFO
+FILEVERSION    @OPENCLAW_VERSION_QUAD@
+PRODUCTVERSION @OPENCLAW_VERSION_QUAD@
+FILEFLAGSMASK  VS_FFI_FILEFLAGSMASK
+#ifdef _DEBUG
+FILEFLAGS      VS_FF_DEBUG
+#else
+FILEFLAGS      0x0L
+#endif
+FILEOS         VOS_NT_WINDOWS32
+FILETYPE       VFT_APP
+FILESUBTYPE    VFT2_UNKNOWN
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        // 040904B0 = US English, Unicode. Must agree with the Translation
+        // value below, or the Details tab silently shows nothing at all.
+        BLOCK "040904B0"
+        BEGIN
+            VALUE "CompanyName",      "@OPENCLAW_COMPANY@"
+            VALUE "FileDescription",  "@OPENCLAW_DESCRIPTION@"
+            VALUE "FileVersion",      "@OPENCLAW_VERSION_STRING@"
+            VALUE "InternalName",     "@OPENCLAW_INTERNAL_NAME@"
+            VALUE "LegalCopyright",   "@OPENCLAW_COPYRIGHT@"
+            VALUE "OriginalFilename", "@OPENCLAW_INTERNAL_NAME@.exe"
+            VALUE "ProductName",      "@OPENCLAW_PRODUCT_NAME@"
+            VALUE "ProductVersion",   "@OPENCLAW_VERSION_STRING@"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END

@@ -29,13 +29,23 @@ import process from 'node:process'
 import { randomUUID } from 'node:crypto'
 
 import { IPC } from '../src/shared/types'
-import type { GatewayConfigView, NodeHostStatus } from '../src/shared/types'
+import type { GatewayConfigView, NodeHostStatus, GatewaySessionListResult } from '../src/shared/types'
 import { getShortcuts } from '../src/shared/shortcuts'
 import { ControlPlane } from '../src/main/claude/control-plane'
 import { getCliRuntime } from '../src/main/openclaw/runtime'
 import { fetchCatalog, listInstalled, installPlugin, uninstallPlugin } from '../src/main/marketplace/catalog'
-import { listSessions } from '../src/main/sessions'
+import { listSessions, readLocalTranscript } from '../src/main/sessions'
 import { runCliAsync, runBinAsync, probe, peekProbe, invalidateProbe, flushProbeCache } from '../src/main/cli-probe'
+import {
+  readGatewaySessions,
+  readGatewaySessionHistory,
+  classifyGatewayFailure,
+  NO_CREDENTIAL,
+  GATEWAY_SESSIONS_PROBE_KEY,
+  GATEWAY_SESSIONS_TTL_MS,
+  GATEWAY_SESSIONS_FAILURE_TTL_MS,
+} from '../src/main/gateway-sessions'
+import type { GatewayRpcResult } from '../src/main/gateway-sessions'
 import { ensureSkills } from '../src/main/skills/installer'
 
 /** How long after boot before skill provisioning may hit the network. */
@@ -323,6 +333,106 @@ async function gatewayCallJson(method: string, params: unknown = {}, timeoutMs =
   } catch {
     return null
   }
+}
+
+/**
+ * Call a gateway RPC, preserving the gateway's own error text.
+ *
+ * A sibling of {@link gatewayCallJson} rather than a replacement for it: that
+ * one collapses every failure to `null`, which is fine for a model list but
+ * loses the single distinction this needs — "this gateway has no sessions.list"
+ * (hide the group) versus "this gateway is down" (say so).
+ */
+async function gatewayCallRaw(
+  method: string,
+  params: unknown = {},
+  timeoutMs = 25000,
+): Promise<GatewayRpcResult> {
+  const token = resolveGatewayToken()
+  if (!token) return { body: null, errorMessage: NO_CREDENTIAL }
+
+  const res = await runCliAsync(
+    ['gateway', 'call', method, '--params', JSON.stringify(params), '--json'],
+    timeoutMs,
+    { OPENCLAW_GATEWAY_TOKEN: token },
+  )
+  if (!res.stdout) {
+    return { body: null, errorMessage: res.stderr.slice(0, 400) || 'no output from gateway call' }
+  }
+  // The CLI prints a banner before the JSON on some paths, so start at the
+  // first brace rather than assuming all of stdout parses.
+  const start = res.stdout.indexOf('{')
+  if (start === -1) return { body: null, errorMessage: 'gateway call returned no JSON' }
+  try {
+    const parsed = JSON.parse(res.stdout.slice(start))
+    // An unknown method answers ok:false at exit code 0, so the payload — not
+    // the exit status — is what says whether this worked.
+    if (parsed && parsed.ok === false) {
+      return { body: null, errorMessage: String(parsed.error?.message || 'gateway rejected the call') }
+    }
+    return { body: parsed, errorMessage: null }
+  } catch {
+    return { body: null, errorMessage: 'gateway call returned malformed JSON' }
+  }
+}
+
+/**
+ * Whether asking the gateway for sessions could possibly work.
+ *
+ * Consulted before any spawn. A purely local install must never pay for a CLI
+ * invocation — or render the group at all — to be told what its own config
+ * already says.
+ */
+function gatewaySessionsEligible(): { eligible: boolean; errorMessage: string } {
+  if (getCliRuntime().kind !== 'openclaw') {
+    return { eligible: false, errorMessage: 'unknown method: not an openclaw runtime' }
+  }
+  const gateway = readOpenclawConfig().gateway
+  if (gateway?.mode !== 'remote' || !gateway?.remote?.url) {
+    return { eligible: false, errorMessage: 'unknown method: no remote gateway configured' }
+  }
+  if (!resolveGatewayToken()) return { eligible: false, errorMessage: NO_CREDENTIAL }
+  return { eligible: true, errorMessage: '' }
+}
+
+/**
+ * The gateway's session list, cached.
+ *
+ * Two TTLs, not one. A successful listing is good for a minute — sessions
+ * change on the order of a conversation. A failure is only good for ten
+ * seconds, so a burst of popover opens collapses onto one spawn while a
+ * gateway that comes back is noticed promptly rather than pinned as dead for
+ * the rest of the minute.
+ *
+ * `probe()` holds a single TTL, so the failure window is enforced here by
+ * invalidating a stale failure before asking.
+ */
+async function listGatewaySessionsCached(): Promise<GatewaySessionListResult> {
+  const cached = peekProbe<GatewaySessionListResult>(GATEWAY_SESSIONS_PROBE_KEY)
+  if (cached && !cached.available && Date.now() - cached.fetchedAt >= GATEWAY_SESSIONS_FAILURE_TTL_MS) {
+    invalidateProbe(GATEWAY_SESSIONS_PROBE_KEY)
+  }
+  return probe<GatewaySessionListResult>(
+    GATEWAY_SESSIONS_PROBE_KEY,
+    async () => {
+      // Never spawn to learn what config already says.
+      const gate = gatewaySessionsEligible()
+      if (!gate.eligible) {
+        const { reason, error } = classifyGatewayFailure(gate.errorMessage)
+        return { ok: false, available: false, sessions: [], reason, error, fetchedAt: Date.now() }
+      }
+      const result = await readGatewaySessions(gatewayCallRaw, Date.now())
+      // Re-stamp: the failure window must be measured from when the answer
+      // landed, not from when the call was dialled. A 20s timeout would
+      // otherwise consume the whole 10s TTL before the entry was even written,
+      // so a failed listing was never cached at all and every reopen paid for
+      // another full spawn.
+      return { ...result, fetchedAt: Date.now() }
+    },
+    // Serve a known-good list instantly and refresh behind it; the next open
+    // gets the fresher value. Never persisted — it names the user's sessions.
+    { ttlMs: GATEWAY_SESSIONS_TTL_MS, staleWhileRevalidate: true },
+  )
 }
 
 /**
@@ -832,6 +942,17 @@ const handlers: Record<string, (args: any) => unknown> = {
     return { ok: true }
   },
 
+  // ── Gateway sessions ──
+  //
+  // `openclaw sessions list` cannot answer this: under gateway.mode=remote it
+  // still reports the LOCAL store. Only `gateway call` crosses the wire.
+  //
+  // Cached, because the picker opens often and one round trip is seconds. The
+  // renderer never waits on this to draw its local list.
+  [IPC.LIST_GATEWAY_SESSIONS]: () => listGatewaySessionsCached(),
+  [IPC.LOAD_GATEWAY_SESSION]: ({ sessionKey }: any) =>
+    readGatewaySessionHistory(gatewayCallRaw, String(sessionKey ?? '')),
+
   // ── Window-layer channels ──
   //
   // The first four were already no-ops in the Electron main process: the native
@@ -1006,6 +1127,7 @@ const handlers: Record<string, (args: any) => unknown> = {
       // Everything cached about the gateway described the old endpoint.
       invalidateProbe('gateway-probe')
       invalidateProbe('gateway-status')
+      invalidateProbe(GATEWAY_SESSIONS_PROBE_KEY)
       invalidateGatewayModelCache()
       log(`gateway config updated: mode=${config.gateway.mode} url=${config.gateway.remote?.url || '(unset)'}`)
       return { ok: true }
@@ -1033,13 +1155,11 @@ const handlers: Record<string, (args: any) => unknown> = {
   // history picker then dereferenced, throwing and unmounting the whole app.
   [IPC.LIST_SESSIONS]: ({ projectPath }: any) =>
     listSessions(projectPath == null ? undefined : String(projectPath)),
-  [IPC.LOAD_SESSION]: async ({ sessionId, projectPath }: any) => {
-    try {
-      return { ok: true, content: await readFileAsync(join(String(projectPath), `${sessionId}.jsonl`), 'utf-8') }
-    } catch (err: any) {
-      return { ok: false, error: String(err?.message ?? err) }
-    }
-  },
+  // Answers SessionLoadMessage[], which is what the contract has always
+  // declared. This used to read `<projectPath>/<id>.jsonl` — a path transcripts
+  // never live at — and answer `{ ok, content }`, so every resume opened empty.
+  [IPC.LOAD_SESSION]: ({ sessionId, projectPath }: any) =>
+    readLocalTranscript(String(sessionId ?? ''), projectPath == null ? undefined : String(projectPath)),
 
   // ── Files ──
   [IPC.PASTE_IMAGE]: async ({ dataUrl }: any) => {

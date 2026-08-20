@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import type { TabStatus, NormalizedEvent, EnrichedError, Message, TabState, Attachment, CatalogPlugin, PluginStatus } from '../../shared/types'
+import type { TabStatus, NormalizedEvent, EnrichedError, Message, TabState, Attachment, CatalogPlugin, PluginStatus, SessionLoadMessage, GatewaySessionMeta } from '../../shared/types'
 import { useThemeStore } from '../theme'
 import notificationSrc from '../../../resources/notification.mp3'
 
@@ -115,6 +115,8 @@ interface State {
   uninstallMarketplacePlugin: (plugin: CatalogPlugin) => Promise<void>
   buildYourOwn: () => void
   resumeSession: (sessionId: string, title?: string, projectPath?: string) => Promise<string>
+  /** Reattach a new tab to a session that lives on the gateway. */
+  resumeGatewaySession: (session: GatewaySessionMeta, title?: string) => Promise<string>
   addSystemMessage: (content: string) => void
   sendMessage: (prompt: string, projectPath?: string) => void
   respondPermission: (tabId: string, questionId: string, optionId: string) => void
@@ -218,6 +220,7 @@ function makeLocalTab(): TabState {
     hasChosenDirectory: false,
     additionalDirs: [],
     gatewayState: 'unknown',
+    sessionOrigin: null,
   }
 }
 
@@ -671,8 +674,14 @@ export const useSessionStore = create<State>((set, get) => ({
     try {
       const { tabId } = await window.clui.createTab()
 
-      // Load previous conversation messages from the JSONL file
-      const history = await window.clui.loadSession(sessionId, defaultDir).catch(() => [])
+      // Load previous conversation messages from the JSONL file.
+      //
+      // The bridge is a trust boundary: `.catch()` only covers a rejection, and
+      // the sidecar used to *resolve* with an object here. `history.map` then
+      // threw synchronously, the outer catch built a second tab with a fresh
+      // id, and the control-plane tab created a line earlier was orphaned.
+      const raw = await window.clui.loadSession(sessionId, defaultDir).catch(() => [])
+      const history: SessionLoadMessage[] = Array.isArray(raw) ? raw : []
       const messages: Message[] = history.map((m) => ({
         id: nextMsgId(),
         role: m.role as Message['role'],
@@ -681,11 +690,20 @@ export const useSessionStore = create<State>((set, get) => ({
         toolStatus: m.toolName ? 'completed' as const : undefined,
         timestamp: m.timestamp,
       }))
+      if (messages.length === 0) {
+        messages.push({
+          id: nextMsgId(),
+          role: 'system',
+          content: 'Resumed this session, but its earlier transcript could not be read. The conversation continues from here.',
+          timestamp: Date.now(),
+        })
+      }
 
       const tab: TabState = {
         ...makeLocalTab(),
         id: tabId,
         claudeSessionId: sessionId,
+        sessionOrigin: 'local',
         title: title || 'Resumed Session',
         workingDirectory: defaultDir,
         hasChosenDirectory: !!projectPath,
@@ -709,6 +727,79 @@ export const useSessionStore = create<State>((set, get) => ({
         activeTabId: tab.id,
         isExpanded: true,
       }))
+      return tab.id
+    }
+  },
+
+  resumeGatewaySession: async (session, title) => {
+    const defaultDir = get().staticInfo?.homePath || '~'
+    const sessionKey = session.sessionKey
+    try {
+      const { tabId } = await window.clui.createTab()
+
+      // The gateway is the only place this transcript exists — there is no
+      // local file to fall back to, so a failure here means an empty tab and
+      // the user is told so rather than left to infer it.
+      const history = await window.clui
+        .loadGatewaySession(sessionKey)
+        .catch(() => null)
+      const wire = history && Array.isArray(history.messages) ? history.messages : []
+      const messages: Message[] = wire.map((m) => ({
+        id: nextMsgId(),
+        role: m.role as Message['role'],
+        content: m.content,
+        toolName: m.toolName,
+        toolStatus: m.toolName ? ('completed' as const) : undefined,
+        timestamp: m.timestamp,
+      }))
+      if (history?.truncated) {
+        messages.unshift({
+          id: nextMsgId(),
+          role: 'system',
+          content: `Showing the most recent ${messages.length} messages of this gateway session${
+            history.totalMessages ? ` (${history.totalMessages} total)` : ''
+          }.`,
+          timestamp: wire[0]?.timestamp ?? Date.now(),
+        })
+      }
+      if (messages.length === 0) {
+        messages.push({
+          id: nextMsgId(),
+          role: 'system',
+          content:
+            history?.error ??
+            'Reattached to this gateway session, but none of its history could be read. The conversation continues from here.',
+          timestamp: Date.now(),
+        })
+      }
+
+      const tab: TabState = {
+        ...makeLocalTab(),
+        id: tabId,
+        // The gateway session key, not a transcript UUID — it goes to
+        // `--session-key`, which names a live session rather than replaying a
+        // recorded one.
+        claudeSessionId: sessionKey,
+        sessionOrigin: 'gateway',
+        title: title || 'Gateway Session',
+        workingDirectory: defaultDir,
+        hasChosenDirectory: false,
+        messages,
+      }
+      set((s) => ({ tabs: [...s.tabs, tab], activeTabId: tab.id, isExpanded: true }))
+      // Deliberately no initSession(): it submits a prompt with no sessionId,
+      // the dispatcher then stamps `clui-<tabId>`, and the echoed session_init
+      // would overwrite the key we just reattached to.
+      return tabId
+    } catch {
+      // createTab failed, so there is no control-plane tab to attach to. Make a
+      // local one rather than losing the click, exactly as resumeSession does.
+      const tab = makeLocalTab()
+      tab.claudeSessionId = sessionKey
+      tab.sessionOrigin = 'gateway'
+      tab.title = title || 'Gateway Session'
+      tab.workingDirectory = defaultDir
+      set((s) => ({ tabs: [...s.tabs, tab], activeTabId: tab.id, isExpanded: true }))
       return tab.id
     }
   },
@@ -900,6 +991,12 @@ export const useSessionStore = create<State>((set, get) => ({
       sessionId: tab.claudeSessionId || undefined,
       model: resolvedModel,
       addDirs: tab.additionalDirs.length > 0 ? tab.additionalDirs : undefined,
+      // Pin a gateway-resumed tab to the gateway. The control plane otherwise
+      // stamps one process-global connection target onto every run, and under
+      // a local target the same key names a *different*, empty conversation
+      // that answers normally — the failure would be silent. This only ever
+      // removes a wrong `--local`; it cannot choose which gateway answers.
+      connection: tab.sessionOrigin === 'gateway' ? { mode: 'gateway' } : undefined,
     }).catch((err: Error) => {
       get().handleError(activeTabId, {
         message: err.message,
@@ -922,7 +1019,14 @@ export const useSessionStore = create<State>((set, get) => ({
 
         switch (event.type) {
           case 'session_init':
-            updated.claudeSessionId = event.sessionId
+            // A gateway-resumed tab's key IS its address, and both openclaw
+            // transports echo back whatever they were given — so this normally
+            // assigns the same value. Guarded anyway: if anything ever reports
+            // an id instead of the key, adopting it would silently redirect
+            // every later turn at a different, empty session.
+            if (tab.sessionOrigin !== 'gateway' || !tab.claudeSessionId) {
+              updated.claudeSessionId = event.sessionId
+            }
             updated.sessionModel = event.model
             updated.sessionTools = event.tools
             updated.sessionMcpServers = event.mcpServers

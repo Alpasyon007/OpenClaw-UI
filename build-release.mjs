@@ -19,6 +19,17 @@ import { join } from 'node:path'
 const webOnly = process.argv.includes('--web')
 const total = webOnly ? 4 : 5
 
+// Where the finished tree is staged. Overridable because `release/` is also
+// where people run the app from, and a running launcher holds its own exe open
+// — the wipe below then fails with EPERM and takes the whole build with it.
+// The installer stages somewhere of its own for exactly that reason.
+const outFlag = process.argv.indexOf('--out')
+const outDir = outFlag >= 0 ? process.argv[outFlag + 1] : 'release'
+if (outFlag >= 0 && !outDir) {
+  console.error('--out needs a directory')
+  process.exit(1)
+}
+
 const root = import.meta.dirname
 const run = (cmd, args, cwd = root) =>
   execFileSync(cmd, args, { cwd, stdio: 'inherit', shell: process.platform === 'win32' })
@@ -69,15 +80,42 @@ console.log('\n[5/5] shell (C++, Release)')
 // with a bare "could not load cache", which reads as a broken checkout rather
 // than a missing step.
 const shell = join(root, 'shell')
-if (!existsSync(join(shell, 'build', 'CMakeCache.txt'))) {
+
+// The fourth part of the executable's FILEVERSION is a CMake cache variable, so
+// it is fixed at configure time rather than build time. Reconfiguring on every
+// build would add ~30s for nothing on a developer machine, where the number is
+// always 0 — so it is only forced when something actually set one.
+const buildNumber = process.env.OPENCLAW_BUILD_NUMBER ?? '0'
+const configured = existsSync(join(shell, 'build', 'CMakeCache.txt'))
+if (!configured) {
   console.log('  (no build cache — configuring first; this fetches saucer)')
-  run('cmake', ['-S', '.', '-B', 'build'], shell)
+  run('cmake', ['-S', '.', '-B', 'build', `-DOPENCLAW_BUILD_NUMBER=${buildNumber}`], shell)
+} else if (buildNumber !== '0') {
+  console.log(`  (build number ${buildNumber} — reconfiguring)`)
+  run('cmake', ['-S', '.', '-B', 'build', `-DOPENCLAW_BUILD_NUMBER=${buildNumber}`], shell)
 }
 run('cmake', ['--build', 'build', '--config', 'Release'], shell)
 
 // Stage a clean, self-contained folder rather than shipping the build tree.
-const out = join(root, 'release')
-if (existsSync(out)) rmSync(out, { recursive: true, force: true })
+const out = join(root, outDir)
+if (existsSync(out)) {
+  try {
+    rmSync(out, { recursive: true, force: true })
+  } catch (err) {
+    // Almost always a running instance holding its own executable open. The
+    // raw EPERM names the directory and not the cause, which sends people
+    // looking at permissions.
+    if (err.code === 'EPERM' || err.code === 'EBUSY') {
+      console.error('')
+      console.error(`Cannot clear ${out} — something is using it.`)
+      console.error('A running OpenClaw window is the usual reason. Close it, or stage elsewhere:')
+      console.error('  node build-release.mjs --out dist/stage')
+      console.error('')
+      process.exit(1)
+    }
+    throw err
+  }
+}
 mkdirSync(out, { recursive: true })
 cpSync(join(root, 'shell', 'build', 'Release'), out, {
   recursive: true,
